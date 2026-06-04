@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ovra
+      POSTGRES_PASSWORD: ovra
+      POSTGRES_DB: ovra
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ovra -d ovra"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: "postgres://ovra:ovra@postgres:5432/ovra?sslmode=disable"
+      WORKSPACE_CONFIG: "/app/workspace.yaml"
+      YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the catalogue so edits don't require a rebuild.
+      - ./workspace.yaml:/app/workspace.yaml:ro
+
+volumes:
+  pgdata:

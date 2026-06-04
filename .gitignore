@@ -1,0 +1,15 @@
+# Binaries
+/server
+*.exe
+/out/
+
+# Local env
+.env
+
+# Go
+/vendor/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

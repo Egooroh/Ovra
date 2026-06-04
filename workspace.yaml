@@ -1,0 +1,13 @@
+# Tenant catalogue: one entry per Telegram chat bound to a YouGile project.
+# Replace the placeholder IDs with real values from YouGile before Phase 2.
+workspaces:
+  - id: "ws-demo"
+    chat_id: "-1001234567890"
+    name: "Demo Team"
+    yougile_project_id: "REPLACE_WITH_PROJECT_ID"
+    columns:
+      todo: "REPLACE_WITH_COLUMN_ID"
+      in_progress: "REPLACE_WITH_COLUMN_ID"
+      review: "REPLACE_WITH_COLUMN_ID"
+      done: "REPLACE_WITH_COLUMN_ID"
+    host_tg_id: "123456789"
