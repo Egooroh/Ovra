@@ -108,6 +108,16 @@ curl -X POST http://localhost:8080/v1/workspaces/ws-demo/credentials \
 
 > Для прода: задайте сильный `APP_SECRET` и не переиспользуйте dev-значение.
 
+### Быстрый бутстрап YouGile (demo)
+
+Создать проект + доску + 4 колонки в пустом аккаунте и получить готовый блок для
+`workspace.yaml`:
+
+```bash
+YOUGILE_LOGIN=... YOUGILE_PASSWORD=... go run ./cmd/ygsetup
+# печатает yougile_project_id и ID колонок (ключ не печатается)
+```
+
 ## Тесты
 
 ```bash
@@ -129,5 +139,5 @@ go test ./...
 - [x] **B-06** — service-слой публикации: расшифровка токена, маппинг `assignee` → `yougile_user_id`, создание карточки в `col_todo`, сохранение `yougile_task_id`
 - [~] **B-07** — готово: `POST /v1/workspaces/{tenant}/credentials`, `POST /v1/tasks`; осталось `PATCH /v1/tasks/{id}`, `GET .../tasks`, `POST /v1/events`
 - [ ] **B-08** — интерфейс `Queue` + in-memory + цикл воркера
-- [ ] **B-09** — E2E: `POST /v1/tasks` → БД → карточка в YouGile
+- [x] **B-09** — E2E пройден вживую: `POST /v1/tasks` → БД → реальная карточка в YouGile (логин/пароль → ключ, UTF-8 OK). Бутстрап проекта/доски/колонок — `cmd/ygsetup`
 - [ ] **B-10** — логирование, обработка ошибок внешних API, финальный README
