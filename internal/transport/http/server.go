@@ -50,7 +50,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /v1/events", s.handlePublishEvent)
-	return s.withLogging(mux)
+	// Outermost first: recover panics, then log every request.
+	return s.recoverPanic(s.requestLogger(mux))
 }
 
 // handleHealthz reports liveness and how many tenants are loaded.
@@ -58,14 +59,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     "ok",
 		"workspaces": len(s.cfg.Workspaces),
-	})
-}
-
-// withLogging logs one line per request at debug level.
-func (s *Server) withLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.log.Debug("request", "method", r.Method, "path", r.URL.Path)
-		next.ServeHTTP(w, r)
 	})
 }
 
