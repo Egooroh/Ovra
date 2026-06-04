@@ -11,6 +11,7 @@ import (
 	"ovra/internal/config"
 	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
+	"ovra/internal/queue"
 	"ovra/internal/secret"
 	"ovra/internal/service"
 	"ovra/internal/storage"
@@ -30,13 +31,14 @@ type Server struct {
 	cipher *secret.Cipher
 	yg     *yougile.Client
 	tasks  TaskService
+	queue  queue.Queue
 	log    *slog.Logger
 }
 
-// NewServer builds a Server with its dependencies. repo, cipher and tasks may be
-// nil until fully wired (cipher/tasks require APP_SECRET).
-func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, tasks TaskService, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, tasks: tasks, log: log}
+// NewServer builds a Server with its dependencies. repo, cipher, tasks and queue
+// may be nil until fully wired (cipher/tasks require APP_SECRET).
+func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, tasks TaskService, q queue.Queue, log *slog.Logger) *Server {
+	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, tasks: tasks, queue: q, log: log}
 }
 
 // Routes returns the configured HTTP handler (Go 1.22+ method-aware mux).
@@ -47,6 +49,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)
+	mux.HandleFunc("POST /v1/events", s.handlePublishEvent)
 	return s.withLogging(mux)
 }
 

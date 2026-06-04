@@ -14,10 +14,12 @@ import (
 
 	"ovra/internal/config"
 	"ovra/internal/integrations/yougile"
+	"ovra/internal/queue"
 	"ovra/internal/secret"
 	"ovra/internal/service"
 	"ovra/internal/storage"
 	httptransport "ovra/internal/transport/http"
+	"ovra/internal/worker"
 	"ovra/migrations"
 )
 
@@ -76,14 +78,25 @@ func main() {
 
 	// Task publisher needs the cipher to decrypt per-workspace tokens; without
 	// APP_SECRET it stays nil and POST /v1/tasks responds 503.
+	var taskSvc *service.Tasks
 	var tasks httptransport.TaskService
 	if cipher != nil {
-		tasks = service.NewTasks(repo, yg, cipher, log)
+		taskSvc = service.NewTasks(repo, yg, cipher, log)
+		tasks = taskSvc
 	}
+
+	// Event queue + worker: route task_create to the task service.
+	q := queue.NewInMemory(256, log)
+	router := worker.NewRouter(log)
+	if taskSvc != nil {
+		router.Register(worker.EventTaskCreate, worker.TaskCreateHandler(taskSvc))
+	}
+	q.Subscribe(router.Handle)
+	defer q.Close()
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, tasks, log).Routes(),
+		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, tasks, q, log).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

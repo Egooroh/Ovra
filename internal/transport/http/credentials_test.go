@@ -78,7 +78,7 @@ func testServer(t *testing.T, repo storage.Repository, ygBase string) http.Handl
 	}
 	yg := yougile.New(yougile.WithBaseURL(ygBase))
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(&config.Config{}, repo, cipher, yg, nil, log).Routes()
+	return NewServer(&config.Config{}, repo, cipher, yg, nil, nil, log).Routes()
 }
 
 func post(t *testing.T, h http.Handler, path, body string) *httptest.ResponseRecorder {

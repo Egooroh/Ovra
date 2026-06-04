@@ -41,7 +41,7 @@ func (f *fakePublisher) UpdateStatus(_ context.Context, id, status string) (doma
 func taskServer(t *testing.T, pub TaskService) http.Handler {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(&config.Config{}, nil, nil, nil, pub, log).Routes()
+	return NewServer(&config.Config{}, nil, nil, nil, pub, nil, log).Routes()
 }
 
 // patch issues a PATCH request.
@@ -187,7 +187,7 @@ func TestListTasks(t *testing.T) {
 		{ID: "t2", TenantID: "ws-1", Title: "B", CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := NewServer(&config.Config{}, repo, nil, nil, nil, log).Routes()
+	h := NewServer(&config.Config{}, repo, nil, nil, nil, nil, log).Routes()
 
 	req := httptest.NewRequest("GET", "/v1/workspaces/ws-1/tasks", nil)
 	rec := httptest.NewRecorder()
