@@ -137,7 +137,7 @@ go test ./...
 - [x] **B-04** — интерфейс `Repository` + Postgres-реализация (CRUD tasks, чтение workspaces/users)
 - [x] **B-05** — REST-клиент YouGile: авторизация (логин/пароль → ключ, или готовый ключ), `POST /tasks`; хранение токена per-workspace (AES-GCM)
 - [x] **B-06** — service-слой публикации: расшифровка токена, маппинг `assignee` → `yougile_user_id`, создание карточки в `col_todo`, сохранение `yougile_task_id`
-- [~] **B-07** — готово: `POST /v1/workspaces/{tenant}/credentials`, `POST /v1/tasks`; осталось `PATCH /v1/tasks/{id}`, `GET .../tasks`, `POST /v1/events`
+- [~] **B-07** — готово: `POST /v1/workspaces/{tenant}/credentials`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` (статус + движение карточки, FR-7), `GET /v1/workspaces/{tenant}/tasks` (дайджест); `POST /v1/events` — вместе с B-08 (очередь)
 - [ ] **B-08** — интерфейс `Queue` + in-memory + цикл воркера
 - [x] **B-09** — E2E пройден вживую: `POST /v1/tasks` → БД → реальная карточка в YouGile (логин/пароль → ключ, UTF-8 OK). Бутстрап проекта/доски/колонок — `cmd/ygsetup`
 - [ ] **B-10** — логирование, обработка ошибок внешних API, финальный README

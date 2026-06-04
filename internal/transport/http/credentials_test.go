@@ -19,6 +19,7 @@ import (
 // fakeRepo is a minimal in-memory Repository for handler tests.
 type fakeRepo struct {
 	workspaces map[string]domain.Workspace
+	tasks      []domain.Task
 	setLogin   string
 	setEnc     []byte
 }
@@ -64,7 +65,7 @@ func (f *fakeRepo) UpdateTask(context.Context, domain.Task) (domain.Task, error)
 	return domain.Task{}, nil
 }
 func (f *fakeRepo) ListTasksByTenant(context.Context, string) ([]domain.Task, error) {
-	return nil, nil
+	return f.tasks, nil
 }
 
 // testServer wires a Server with a real cipher and a YouGile client pointed at

@@ -76,6 +76,79 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toTaskResponse(task))
 }
 
+// updateTaskRequest is the body of PATCH /v1/tasks/{id}.
+type updateTaskRequest struct {
+	Status string `json:"status"`
+}
+
+// handleUpdateTask changes a task's status and moves its YouGile card.
+func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
+	if s.tasks == nil {
+		writeError(w, http.StatusServiceUnavailable, "task updates disabled: APP_SECRET not set")
+		return
+	}
+
+	id := r.PathValue("id")
+	var req updateTaskRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Status == "" {
+		writeError(w, http.StatusBadRequest, "status is required")
+		return
+	}
+
+	task, err := s.tasks.UpdateStatus(r.Context(), id, req.Status)
+	if err != nil {
+		s.writeUpdateTaskError(w, task, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toTaskResponse(task))
+}
+
+// writeUpdateTaskError maps an update failure to an HTTP status.
+func (s *Server) writeUpdateTaskError(w http.ResponseWriter, task domain.Task, err error) {
+	switch {
+	case errors.Is(err, service.ErrInvalidStatus):
+		writeError(w, http.StatusBadRequest, "status must be one of: todo, in_progress, review, done")
+	case errors.Is(err, storage.ErrNotFound):
+		writeError(w, http.StatusNotFound, "task not found")
+	case errors.Is(err, service.ErrNoCredentials):
+		writeError(w, http.StatusConflict, "workspace is not connected to YouGile")
+	case task.ID != "":
+		// Status saved in the DB but the YouGile card move failed.
+		s.log.Error("move yougile card", "task_id", task.ID, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "status saved but YouGile card move failed: " + err.Error(),
+			"task":  toTaskResponse(task),
+		})
+	default:
+		s.log.Error("update task", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// handleListTasks returns the tasks of a workspace (for the digest, FR-7).
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	tasks, err := s.repo.ListTasksByTenant(r.Context(), tenant)
+	if err != nil {
+		s.log.Error("list tasks", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	resp := make([]taskResponse, len(tasks))
+	for i, t := range tasks {
+		resp[i] = toTaskResponse(t)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": resp})
+}
+
 // writeCreateTaskError maps a publish failure to an HTTP status.
 func (s *Server) writeCreateTaskError(w http.ResponseWriter, task domain.Task, err error) {
 	switch {

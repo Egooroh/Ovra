@@ -15,6 +15,7 @@ import (
 type fakeStore struct {
 	ws       domain.Workspace
 	tokenEnc []byte
+	task     domain.Task // returned by GetTask
 	created  domain.Task
 	updated  domain.Task
 }
@@ -30,15 +31,20 @@ func (f *fakeStore) CreateTask(_ context.Context, t domain.Task) (domain.Task, e
 	f.created = t
 	return t, nil
 }
+func (f *fakeStore) GetTask(context.Context, string) (domain.Task, error) {
+	return f.task, nil
+}
 func (f *fakeStore) UpdateTask(_ context.Context, t domain.Task) (domain.Task, error) {
 	f.updated = t
 	return t, nil
 }
 
 type fakeYG struct {
-	users   []yougile.User
-	lastReq yougile.CreateTaskRequest
-	token   string
+	users     []yougile.User
+	lastReq   yougile.CreateTaskRequest
+	token     string
+	movedTo   string
+	completed bool
 }
 
 func (f *fakeYG) ListUsers(context.Context, string) ([]yougile.User, error) {
@@ -47,6 +53,14 @@ func (f *fakeYG) ListUsers(context.Context, string) ([]yougile.User, error) {
 func (f *fakeYG) CreateTask(_ context.Context, token string, req yougile.CreateTaskRequest) (string, error) {
 	f.token, f.lastReq = token, req
 	return "card-99", nil
+}
+func (f *fakeYG) MoveTask(_ context.Context, _, _, columnID string) error {
+	f.movedTo = columnID
+	return nil
+}
+func (f *fakeYG) CompleteTask(context.Context, string, string) error {
+	f.completed = true
+	return nil
 }
 
 func newService(t *testing.T, store Store, yg YougileAPI) (*Tasks, *secret.Cipher) {
@@ -107,6 +121,56 @@ func TestCreateAndPublishNoCredentials(t *testing.T) {
 	_, err := svc.CreateAndPublish(context.Background(), TaskInput{TenantID: "ws-1", Title: "x"})
 	if !errors.Is(err, ErrNoCredentials) {
 		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+}
+
+func TestUpdateStatusMovesAndCompletes(t *testing.T) {
+	cardID := "card-7"
+	store := &fakeStore{
+		ws:   domain.Workspace{ID: "ws-1"},
+		task: domain.Task{ID: "t1", TenantID: "ws-1", YougileTaskID: &cardID},
+	}
+	store.ws.Columns.Done = "col-done"
+	yg := &fakeYG{}
+	svc, cipher := newService(t, store, yg)
+	enc, _ := cipher.Seal("tok")
+	store.tokenEnc = enc
+
+	task, err := svc.UpdateStatus(context.Background(), "t1", domain.StatusDone)
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if task.Status != domain.StatusDone || store.updated.Status != domain.StatusDone {
+		t.Fatalf("status not persisted: %+v", store.updated)
+	}
+	if yg.movedTo != "col-done" {
+		t.Fatalf("moved to %q, want col-done", yg.movedTo)
+	}
+	if !yg.completed {
+		t.Fatal("expected CompleteTask on done")
+	}
+}
+
+func TestUpdateStatusInvalid(t *testing.T) {
+	svc, _ := newService(t, &fakeStore{}, &fakeYG{})
+	_, err := svc.UpdateStatus(context.Background(), "t1", "bogus")
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("err = %v, want ErrInvalidStatus", err)
+	}
+}
+
+func TestUpdateStatusUnpublishedSkipsYouGile(t *testing.T) {
+	// No YougileTaskID → DB updated, no card move attempted.
+	store := &fakeStore{task: domain.Task{ID: "t1", TenantID: "ws-1"}}
+	yg := &fakeYG{}
+	svc, _ := newService(t, store, yg)
+
+	_, err := svc.UpdateStatus(context.Background(), "t1", domain.StatusInProgress)
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if yg.movedTo != "" || yg.completed {
+		t.Fatalf("YouGile should not be called: movedTo=%q completed=%v", yg.movedTo, yg.completed)
 	}
 }
 

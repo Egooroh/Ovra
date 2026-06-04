@@ -76,7 +76,7 @@ func main() {
 
 	// Task publisher needs the cipher to decrypt per-workspace tokens; without
 	// APP_SECRET it stays nil and POST /v1/tasks responds 503.
-	var tasks httptransport.TaskPublisher
+	var tasks httptransport.TaskService
 	if cipher != nil {
 		tasks = service.NewTasks(repo, yg, cipher, log)
 	}

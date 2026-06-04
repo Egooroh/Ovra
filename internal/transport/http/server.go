@@ -16,10 +16,11 @@ import (
 	"ovra/internal/storage"
 )
 
-// TaskPublisher persists an approved task and creates its YouGile card.
-// *service.Tasks implements it; handlers depend on the interface for testability.
-type TaskPublisher interface {
+// TaskService is the task application logic the handlers depend on.
+// *service.Tasks implements it; the interface keeps handlers testable.
+type TaskService interface {
 	CreateAndPublish(ctx context.Context, in service.TaskInput) (domain.Task, error)
+	UpdateStatus(ctx context.Context, id, status string) (domain.Task, error)
 }
 
 // Server holds the dependencies the HTTP handlers need.
@@ -28,13 +29,13 @@ type Server struct {
 	repo   storage.Repository
 	cipher *secret.Cipher
 	yg     *yougile.Client
-	tasks  TaskPublisher
+	tasks  TaskService
 	log    *slog.Logger
 }
 
 // NewServer builds a Server with its dependencies. repo, cipher and tasks may be
 // nil until fully wired (cipher/tasks require APP_SECRET).
-func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, tasks TaskPublisher, log *slog.Logger) *Server {
+func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, tasks TaskService, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, tasks: tasks, log: log}
 }
 
@@ -44,6 +45,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/credentials", s.handleSetCredentials)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
+	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
+	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)
 	return s.withLogging(mux)
 }
 

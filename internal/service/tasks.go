@@ -19,11 +19,15 @@ import (
 // ErrNoCredentials means the workspace has not been connected to YouGile yet.
 var ErrNoCredentials = errors.New("service: workspace has no YouGile credentials")
 
+// ErrInvalidStatus is returned when a status is not one of the board states.
+var ErrInvalidStatus = errors.New("service: invalid status")
+
 // Store is the slice of the repository the task service needs.
 type Store interface {
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
 	GetYougileTokenEnc(ctx context.Context, id string) (login string, tokenEnc []byte, err error)
 	CreateTask(ctx context.Context, t domain.Task) (domain.Task, error)
+	GetTask(ctx context.Context, id string) (domain.Task, error)
 	UpdateTask(ctx context.Context, t domain.Task) (domain.Task, error)
 }
 
@@ -31,6 +35,8 @@ type Store interface {
 type YougileAPI interface {
 	ListUsers(ctx context.Context, token string) ([]yougile.User, error)
 	CreateTask(ctx context.Context, token string, req yougile.CreateTaskRequest) (string, error)
+	MoveTask(ctx context.Context, token, id, columnID string) error
+	CompleteTask(ctx context.Context, token, id string) error
 }
 
 // Tasks publishes approved tasks to YouGile.
@@ -114,6 +120,81 @@ func (s *Tasks) CreateAndPublish(ctx context.Context, in TaskInput) (domain.Task
 	s.log.Info("task published",
 		"task_id", task.ID, "yougile_task_id", cardID, "tenant", in.TenantID)
 	return task, nil
+}
+
+// UpdateStatus changes a task's status and moves its YouGile card to the
+// matching column (completing it when done). The DB is updated first; if the
+// card has not been published yet the YouGile step is skipped. A card-move
+// failure leaves the DB updated and returns the task plus the error.
+func (s *Tasks) UpdateStatus(ctx context.Context, id, status string) (domain.Task, error) {
+	if !validStatus(status) {
+		return domain.Task{}, fmt.Errorf("%w: %q", ErrInvalidStatus, status)
+	}
+
+	task, err := s.store.GetTask(ctx, id)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("get task: %w", err)
+	}
+
+	task.Status = status
+	task, err = s.store.UpdateTask(ctx, task)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("update task: %w", err)
+	}
+
+	// Nothing to move if the card hasn't been published.
+	if task.YougileTaskID == nil || *task.YougileTaskID == "" {
+		return task, nil
+	}
+
+	ws, err := s.store.GetWorkspace(ctx, task.TenantID)
+	if err != nil {
+		return task, fmt.Errorf("get workspace: %w", err)
+	}
+	token, err := s.workspaceToken(ctx, task.TenantID)
+	if err != nil {
+		return task, err
+	}
+
+	if col := columnForStatus(ws, status); col != "" {
+		if err := s.yg.MoveTask(ctx, token, *task.YougileTaskID, col); err != nil {
+			return task, fmt.Errorf("move card: %w", err)
+		}
+	}
+	if status == domain.StatusDone {
+		if err := s.yg.CompleteTask(ctx, token, *task.YougileTaskID); err != nil {
+			return task, fmt.Errorf("complete card: %w", err)
+		}
+	}
+
+	s.log.Info("task status updated", "task_id", task.ID, "status", status)
+	return task, nil
+}
+
+// validStatus reports whether status is a known board state.
+func validStatus(status string) bool {
+	switch status {
+	case domain.StatusTodo, domain.StatusInProgress, domain.StatusReview, domain.StatusDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// columnForStatus maps a board status to the workspace's YouGile column id.
+func columnForStatus(ws domain.Workspace, status string) string {
+	switch status {
+	case domain.StatusTodo:
+		return ws.Columns.Todo
+	case domain.StatusInProgress:
+		return ws.Columns.InProgress
+	case domain.StatusReview:
+		return ws.Columns.Review
+	case domain.StatusDone:
+		return ws.Columns.Done
+	default:
+		return ""
+	}
 }
 
 // workspaceToken loads and decrypts the per-workspace YouGile token.
