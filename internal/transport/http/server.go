@@ -3,15 +3,24 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 
 	"ovra/internal/config"
+	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
 	"ovra/internal/secret"
+	"ovra/internal/service"
 	"ovra/internal/storage"
 )
+
+// TaskPublisher persists an approved task and creates its YouGile card.
+// *service.Tasks implements it; handlers depend on the interface for testability.
+type TaskPublisher interface {
+	CreateAndPublish(ctx context.Context, in service.TaskInput) (domain.Task, error)
+}
 
 // Server holds the dependencies the HTTP handlers need.
 type Server struct {
@@ -19,13 +28,14 @@ type Server struct {
 	repo   storage.Repository
 	cipher *secret.Cipher
 	yg     *yougile.Client
+	tasks  TaskPublisher
 	log    *slog.Logger
 }
 
-// NewServer builds a Server with its dependencies. repo and cipher may be nil
-// until the /v1/* handlers are wired in Phase 3 (cipher requires APP_SECRET).
-func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, log: log}
+// NewServer builds a Server with its dependencies. repo, cipher and tasks may be
+// nil until fully wired (cipher/tasks require APP_SECRET).
+func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, tasks TaskPublisher, log *slog.Logger) *Server {
+	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, tasks: tasks, log: log}
 }
 
 // Routes returns the configured HTTP handler (Go 1.22+ method-aware mux).
@@ -33,6 +43,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/credentials", s.handleSetCredentials)
+	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	return s.withLogging(mux)
 }
 

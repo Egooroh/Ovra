@@ -15,6 +15,7 @@ import (
 	"ovra/internal/config"
 	"ovra/internal/integrations/yougile"
 	"ovra/internal/secret"
+	"ovra/internal/service"
 	"ovra/internal/storage"
 	httptransport "ovra/internal/transport/http"
 	"ovra/migrations"
@@ -73,9 +74,16 @@ func main() {
 	}
 	yg := yougile.New(ygOpts...)
 
+	// Task publisher needs the cipher to decrypt per-workspace tokens; without
+	// APP_SECRET it stays nil and POST /v1/tasks responds 503.
+	var tasks httptransport.TaskPublisher
+	if cipher != nil {
+		tasks = service.NewTasks(repo, yg, cipher, log)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, log).Routes(),
+		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, tasks, log).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
