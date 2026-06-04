@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ovra/internal/config"
+	"ovra/internal/integrations/yougile"
 	"ovra/internal/secret"
 	"ovra/internal/storage"
 	httptransport "ovra/internal/transport/http"
@@ -65,9 +66,16 @@ func main() {
 		cipher = c
 	}
 
+	// YouGile REST client (base URL overridable for testing/self-hosting).
+	var ygOpts []yougile.Option
+	if base := os.Getenv("YOUGILE_BASE_URL"); base != "" {
+		ygOpts = append(ygOpts, yougile.WithBaseURL(base))
+	}
+	yg := yougile.New(ygOpts...)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httptransport.NewServer(cfg, repo, cipher, log).Routes(),
+		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, log).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

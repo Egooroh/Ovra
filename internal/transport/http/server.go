@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"ovra/internal/config"
+	"ovra/internal/integrations/yougile"
 	"ovra/internal/secret"
 	"ovra/internal/storage"
 )
@@ -17,19 +18,21 @@ type Server struct {
 	cfg    *config.Config
 	repo   storage.Repository
 	cipher *secret.Cipher
+	yg     *yougile.Client
 	log    *slog.Logger
 }
 
 // NewServer builds a Server with its dependencies. repo and cipher may be nil
 // until the /v1/* handlers are wired in Phase 3 (cipher requires APP_SECRET).
-func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, repo: repo, cipher: cipher, log: log}
+func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, yg *yougile.Client, log *slog.Logger) *Server {
+	return &Server{cfg: cfg, repo: repo, cipher: cipher, yg: yg, log: log}
 }
 
 // Routes returns the configured HTTP handler (Go 1.22+ method-aware mux).
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("POST /v1/workspaces/{tenant}/credentials", s.handleSetCredentials)
 	return s.withLogging(mux)
 }
 
@@ -54,4 +57,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes a JSON error envelope: {"error": "..."}.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }
