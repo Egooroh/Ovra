@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: ovra
       POSTGRES_DB: ovra
     ports:
-      - "5432:5432"
+      # Host 5433 to avoid clashing with a locally-installed Postgres on 5432.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -25,6 +26,8 @@ services:
       DATABASE_URL: "postgres://ovra:ovra@postgres:5432/ovra?sslmode=disable"
       WORKSPACE_CONFIG: "/app/workspace.yaml"
       YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
+      # Encrypts per-workspace YouGile tokens at rest. CHANGE for production.
+      APP_SECRET: "${APP_SECRET:-dev-only-change-me}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       - "8080:8080"

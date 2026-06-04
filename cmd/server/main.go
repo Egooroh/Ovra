@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"ovra/internal/config"
+	"ovra/internal/secret"
+	"ovra/internal/storage"
 	httptransport "ovra/internal/transport/http"
+	"ovra/migrations"
 )
 
 func main() {
@@ -26,9 +29,45 @@ func main() {
 	}
 	log.Info("config loaded", "http_addr", cfg.HTTPAddr, "workspaces", len(cfg.Workspaces))
 
+	// Connect to Postgres, apply migrations, and seed the tenant catalogue.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStartup()
+
+	repo, err := storage.Connect(startupCtx, cfg.DatabaseURL)
+	if err != nil {
+		log.Error("connect database", "err", err)
+		os.Exit(1)
+	}
+	defer repo.Close()
+
+	if err := storage.Migrate(startupCtx, repo.Pool(), migrations.FS); err != nil {
+		log.Error("run migrations", "err", err)
+		os.Exit(1)
+	}
+	log.Info("migrations applied")
+
+	for _, ws := range cfg.Workspaces {
+		if err := repo.UpsertWorkspace(startupCtx, ws); err != nil {
+			log.Error("seed workspace", "id", ws.ID, "err", err)
+			os.Exit(1)
+		}
+	}
+	if n := len(cfg.Workspaces); n > 0 {
+		log.Info("workspaces seeded", "count", n)
+	}
+
+	// Cipher for per-workspace secrets. Optional: without APP_SECRET the server
+	// still serves /healthz, but the credentials endpoint will be unavailable.
+	var cipher *secret.Cipher
+	if c, err := secret.New(cfg.AppSecret); err != nil {
+		log.Warn("APP_SECRET not set: YouGile credential storage disabled", "err", err)
+	} else {
+		cipher = c
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httptransport.NewServer(cfg, log).Routes(),
+		Handler:           httptransport.NewServer(cfg, repo, cipher, log).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

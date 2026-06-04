@@ -6,6 +6,9 @@
 # Local env
 .env
 
+# Logs
+*.log
+
 # Go
 /vendor/
 

@@ -1,7 +1,28 @@
 // Package domain holds the core business entities shared across layers.
-// Phase 0 defines only what the config loader needs (Workspace); Task, User
-// and Meeting are filled in during Phase 1 (storage).
 package domain
+
+import "time"
+
+// Approval states for a task awaiting the host's decision.
+const (
+	ApprovalPending  = "pending"
+	ApprovalApproved = "approved"
+	ApprovalRejected = "rejected"
+)
+
+// Board statuses, aligned with the workspace columns.
+const (
+	StatusTodo       = "todo"
+	StatusInProgress = "in_progress"
+	StatusReview     = "review"
+	StatusDone       = "done"
+)
+
+// Task sources.
+const (
+	SourceChat    = "chat"
+	SourceMeeting = "meeting"
+)
 
 // Columns maps the four MVP board states to YouGile column IDs.
 type Columns struct {
@@ -19,4 +40,45 @@ type Workspace struct {
 	YougileProjectID string  `yaml:"yougile_project_id"`
 	Columns          Columns `yaml:"columns"`
 	HostTgID         string  `yaml:"host_tg_id"`
+}
+
+// User is a workspace member mapped to their YouGile account.
+type User struct {
+	ID            string
+	TenantID      string
+	TgID          string
+	TgUsername    string
+	FullName      string
+	YougileUserID string
+}
+
+// Task is a candidate or approved task; once approved it becomes a YouGile card.
+// Pointer fields are nullable in the database.
+type Task struct {
+	ID             string
+	TenantID       string
+	Title          string
+	Description    string
+	AssigneeUserID *string
+	Deadline       *time.Time
+	Status         string
+	ApprovalStatus string
+	YougileTaskID  *string
+	MeetingID      *string
+	Source         string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// Meeting is the source of meeting-derived tasks (transcript/summary).
+type Meeting struct {
+	ID          string
+	TenantID    string
+	Title       string
+	MeetingURL  string
+	Transcript  string
+	Summary     string
+	ScheduledAt *time.Time
+	EndedAt     *time.Time
+	Status      string
 }

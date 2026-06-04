@@ -18,8 +18,11 @@ type Config struct {
 	HTTPAddr string
 	// DatabaseURL is the Postgres DSN (used from Phase 1 onward).
 	DatabaseURL string
-	// YougileAPIToken authenticates the YouGile REST client (Phase 2).
+	// YougileAPIToken is an optional global fallback token (used only when a
+	// workspace has no per-tenant token of its own).
 	YougileAPIToken string
+	// AppSecret is the passphrase that encrypts per-workspace secrets at rest.
+	AppSecret string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -34,8 +37,9 @@ type workspaceFile struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		HTTPAddr:        env("HTTP_ADDR", ":8080"),
-		DatabaseURL:     env("DATABASE_URL", "postgres://ovra:ovra@localhost:5432/ovra?sslmode=disable"),
+		DatabaseURL:     env("DATABASE_URL", "postgres://ovra:ovra@localhost:5433/ovra?sslmode=disable"),
 		YougileAPIToken: os.Getenv("YOUGILE_API_TOKEN"),
+		AppSecret:       os.Getenv("APP_SECRET"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")

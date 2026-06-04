@@ -8,17 +8,22 @@ import (
 	"net/http"
 
 	"ovra/internal/config"
+	"ovra/internal/secret"
+	"ovra/internal/storage"
 )
 
 // Server holds the dependencies the HTTP handlers need.
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
+	cfg    *config.Config
+	repo   storage.Repository
+	cipher *secret.Cipher
+	log    *slog.Logger
 }
 
-// NewServer builds a Server with its dependencies.
-func NewServer(cfg *config.Config, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, log: log}
+// NewServer builds a Server with its dependencies. repo and cipher may be nil
+// until the /v1/* handlers are wired in Phase 3 (cipher requires APP_SECRET).
+func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Cipher, log *slog.Logger) *Server {
+	return &Server{cfg: cfg, repo: repo, cipher: cipher, log: log}
 }
 
 // Routes returns the configured HTTP handler (Go 1.22+ method-aware mux).
