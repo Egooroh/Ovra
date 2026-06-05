@@ -1,0 +1,90 @@
+// Prisma schema for the meeting-assistant worker.
+// Source of truth for call state shared between orchestrator and forked workers.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Lifecycle of a single call. Maps 1:1 to the CallState machine in TS.
+enum CallStatus {
+  SCHEDULED // discovered by calendar-watcher, not yet picked up
+  CLAIMED   // orchestrator reserved it, about to fork a worker
+  JOINING   // worker launched, Playwright opening Telemost
+  IN_CALL   // joined, audio capture + transcription running
+  ENDING    // end-of-call detected, flushing transcript
+  DONE       // finished cleanly
+  FAILED    // unrecoverable error (see lastError)
+  CANCELLED // meeting removed from calendar before join
+}
+
+/// One scheduled/known meeting the bot should attend.
+model Call {
+  id        String   @id @default(cuid())
+  /// Stable id from the calendar source (dedupe key for the watcher).
+  sourceId  String   @unique
+  /// Where the bot connects.
+  joinUrl   String
+  title     String?
+  /// Calendar-provided times; the worker fills actual* on transitions.
+  startsAt  DateTime
+  endsAt    DateTime?
+
+  status    CallStatus @default(SCHEDULED)
+
+  /// Liveness for crash detection: orchestrator fences stale CLAIMED/JOINING/IN_CALL rows.
+  workerPid     Int?
+  claimedAt     DateTime?
+  heartbeatAt   DateTime?
+  joinedAt      DateTime?
+  endedAt       DateTime?
+
+  /// How many times we (re)launched a worker for this call.
+  attempts  Int      @default(0)
+  lastError String?
+
+  transcript Transcript?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, startsAt])
+  @@index([heartbeatAt])
+}
+
+/// Aggregated transcript for one call, assembled from streamed segments.
+model Transcript {
+  id        String   @id @default(cuid())
+  callId    String   @unique
+  call      Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  /// Full text, periodically rewritten as segments finalize.
+  fullText  String   @default("")
+  segments  TranscriptSegment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// One finalized chunk from the SpeechKit stream.
+model TranscriptSegment {
+  id           String   @id @default(cuid())
+  transcriptId String
+  transcript   Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  /// Offsets in seconds from call start.
+  startMs   Int
+  endMs     Int
+  text      String
+  /// Optional speaker label if diarization is available later.
+  speaker   String?
+  isFinal   Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([transcriptId, startMs])
+}

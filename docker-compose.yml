@@ -6,7 +6,6 @@ services:
       POSTGRES_PASSWORD: ovra
       POSTGRES_DB: ovra
     ports:
-      # Host 5433 to avoid clashing with a locally-installed Postgres on 5432.
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -26,14 +25,47 @@ services:
       DATABASE_URL: "postgres://ovra:ovra@postgres:5432/ovra?sslmode=disable"
       WORKSPACE_CONFIG: "/app/workspace.yaml"
       YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
-      # Encrypts per-workspace YouGile tokens at rest. CHANGE for production.
       APP_SECRET: "${APP_SECRET:-dev-only-change-me}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       - "8080:8080"
     volumes:
-      # Mount the catalogue so edits don't require a rebuild.
       - ./workspace.yaml:/app/workspace.yaml:ro
+
+  meeting-worker:
+    build: ./meeting-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Та же БД — только меняем хост на имя сервиса postgres внутри compose
+      DATABASE_URL: "postgresql://ovra:ovra@postgres:5432/ovra?schema=public"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ORCH_POLL_MS: "${ORCH_POLL_MS:-15000}"
+      ORCH_JOIN_LEAD_MS: "${ORCH_JOIN_LEAD_MS:-60000}"
+      ORCH_MAX_CALLS: "${ORCH_MAX_CALLS:-3}"
+      ORCH_HEARTBEAT_TIMEOUT_MS: "${ORCH_HEARTBEAT_TIMEOUT_MS:-45000}"
+      ORCH_MAX_ATTEMPTS: "${ORCH_MAX_ATTEMPTS:-2}"
+      WORKER_HEARTBEAT_MS: "${WORKER_HEARTBEAT_MS:-15000}"
+      WORKER_MAX_CALL_MS: "${WORKER_MAX_CALL_MS:-10800000}"
+      WORKER_SILENCE_MS: "${WORKER_SILENCE_MS:-300000}"
+      AUDIO_SAMPLE_RATE: "${AUDIO_SAMPLE_RATE:-16000}"
+      AUDIO_CHANNELS: "${AUDIO_CHANNELS:-1}"
+      GOOGLE_SA_JSON: "${GOOGLE_SA_JSON:-}"
+      GOOGLE_CALENDAR_IDS: "${GOOGLE_CALENDAR_IDS:-}"
+      YANDEX_CALDAV_USERNAME: "${YANDEX_CALDAV_USERNAME:-}"
+      YANDEX_CALDAV_PASSWORD: "${YANDEX_CALDAV_PASSWORD:-}"
+      CALENDAR_POLL_MS: "${CALENDAR_POLL_MS:-300000}"
+      CALENDAR_LOOKAHEAD_MS: "${CALENDAR_LOOKAHEAD_MS:-7200000}"
+      YANDEX_API_KEY: "${YANDEX_API_KEY:-}"
+      YANDEX_FOLDER_ID: "${YANDEX_FOLDER_ID:-}"
+      YANDEX_STT_ENDPOINT: "${YANDEX_STT_ENDPOINT:-stt.api.cloud.yandex.net:443}"
+      YANDEX_STT_LANG: "${YANDEX_STT_LANG:-ru-RU}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      # JSON-файлы саммари встреч — общая папка чтобы Go-разработчик мог читать
+      - meeting_output:/app/output
 
 volumes:
   pgdata:
+  meeting_output:

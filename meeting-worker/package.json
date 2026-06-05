@@ -1,0 +1,32 @@
+{
+  "name": "meeting-assistant-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Background worker: joins Telemost calls, captures audio, transcribes via Yandex SpeechKit, writes tasks/transcripts to Postgres.",
+  "main": "dist/orchestrator/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev:orchestrator": "ts-node src/orchestrator/index.ts",
+    "dev:worker": "ts-node src/worker/index.ts",
+    "start": "node dist/orchestrator/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "calendar:once": "ts-node src/calendar/watcher.ts --once"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "googleapis": "^173.0.0",
+    "node-ical": "^0.26.1",
+    "tsdav": "^2.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "optionalDependencies": {
+    "pino": "^9.0.0"
+  }
+}
