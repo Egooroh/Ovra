@@ -13,12 +13,12 @@ import { log } from "../../util/log";
 
 const BOT_NAME = process.env.BOT_NAME ?? "Meeting Assistant";
 
-// How long to wait for the lobby page to load and show the join button.
 const LOBBY_TIMEOUT_MS = 30_000;
-// How long to wait after clicking Join until we see in-call controls.
 const JOIN_TIMEOUT_MS = 60_000;
-// How often to scan the DOM for "call ended" text.
 const END_POLL_INTERVAL_MS = 2_000;
+// Leave automatically after this many ms alone in the call (no remote participants).
+const ALONE_TIMEOUT_MS = Number(process.env.ALONE_TIMEOUT_MS ?? 20_000);
+const ALONE_POLL_INTERVAL_MS = 5_000;
 
 export class TelemostClient implements MeetingClient {
   private browser?: Browser;
@@ -26,6 +26,7 @@ export class TelemostClient implements MeetingClient {
   private page?: Page;
   private endCallbacks: Array<(reason: EndReason) => void> = [];
   private endPollTimer?: NodeJS.Timeout;
+  private alonePollTimer?: NodeJS.Timeout;
   private ended = false;
 
   constructor(private readonly env: WorkerEnv) {}
@@ -44,10 +45,9 @@ export class TelemostClient implements MeetingClient {
     log.info({ joinUrl }, "telemost.navigating");
     await this.page.goto(joinUrl, { waitUntil: "networkidle", timeout: LOBBY_TIMEOUT_MS });
 
-    // Telemost shows an interstitial "open in app or browser?" page first.
     await this.clickContinueInBrowser();
-
     await this.fillNameIfPrompted();
+    await this.muteMicInLobby();
     await this.clickJoin();
     await this.waitUntilInCall();
 
@@ -72,6 +72,7 @@ export class TelemostClient implements MeetingClient {
 
   async dispose(): Promise<void> {
     clearInterval(this.endPollTimer);
+    clearInterval(this.alonePollTimer);
     await this.context?.close().catch(() => {});
     await this.browser?.close().catch(() => {});
     this.page = undefined;
@@ -89,25 +90,19 @@ export class TelemostClient implements MeetingClient {
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      // Auto-grant media permission dialogs without user interaction.
       "--use-fake-ui-for-media-stream",
     ];
 
     if (isLinux) {
-      // On Linux prod: use real PulseAudio sink so ffmpeg can capture the audio.
-      // Chromium will route its audio output to the sink named in env.
       args.push(
         `--alsa-output-device=pulse`,
-        `--disable-audio-output`,          // don't play back — just route to sink
+        `--disable-audio-output`,
       );
     } else {
-      // On Windows/Mac dev: no real audio device needed yet (StubAudio).
       args.push("--use-fake-device-for-media-stream");
     }
 
     return chromium.launch({
-      // On Linux use headed mode on the Xvfb virtual display.
-      // On Windows/Mac headless is fine for development.
       headless: !isLinux,
       args,
       env: isLinux
@@ -119,9 +114,7 @@ export class TelemostClient implements MeetingClient {
 
   private async buildContext(): Promise<BrowserContext> {
     return this.browser!.newContext({
-      // Pre-grant camera and microphone so Chromium never shows a permission bar.
       permissions: ["microphone", "camera"],
-      // Locale matching Telemost's interface language.
       locale: "ru-RU",
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -130,18 +123,15 @@ export class TelemostClient implements MeetingClient {
     });
   }
 
-  // Click the interstitial "Продолжить в браузере" and wait for the lobby.
   private async clickContinueInBrowser(): Promise<void> {
     const btn = await this.waitForFirst(SELECTORS.continueInBrowser, LOBBY_TIMEOUT_MS);
     if (!btn) throw new Error("Telemost: 'Продолжить в браузере' button not found");
     await btn.click();
-    // SPA: no new page load after click — wait for the join button to appear.
     const joinSel = SELECTORS.joinButton.join(", ");
     await this.page!.waitForSelector(joinSel, { timeout: LOBBY_TIMEOUT_MS });
     log.info("telemost.continue_in_browser_clicked");
   }
 
-  // If the lobby shows a name input (guest flow) — fill it.
   private async fillNameIfPrompted(): Promise<void> {
     const input = await this.findFirst(SELECTORS.nameInput);
     if (input) {
@@ -158,28 +148,35 @@ export class TelemostClient implements MeetingClient {
   }
 
   private async waitUntilInCall(): Promise<void> {
-    // Wait for the lobby join button to disappear — it's present in lobby,
-    // gone once we're inside the room.
-    // String expression runs in browser context — document available there.
+    // Function form uses Runtime.callFunctionOn — not eval — safe under Telemost's CSP.
     await this.page!.waitForFunction(
-      '!document.querySelector(\'[data-testid="enter-conference-button"]\')',
+      () => !document.querySelector('[data-testid="enter-conference-button"]'),
+      undefined,
       { timeout: JOIN_TIMEOUT_MS, polling: 500 },
     );
-    // Then confirm the in-call leave button appeared.
     const found = await this.waitForFirst(SELECTORS.inCallIndicator, 10_000);
     if (!found) throw new Error("Telemost: in-call indicator not found after lobby disappeared");
   }
 
+  // Mute the microphone in the lobby before clicking Join.
+  // The lobby has a mic toggle left of the "Подключиться" button.
+  private async muteMicInLobby(): Promise<void> {
+    const btn = await this.findFirst(SELECTORS.lobbyMicToggle);
+    if (btn) {
+      await btn.click().catch(() => {});
+      log.info("telemost.lobby_mic_muted");
+    } else {
+      log.warn("telemost.lobby_mic_button_not_found");
+    }
+  }
+
   // ---------------------------------------------------------------------------
-  // End-of-call detection: three independent strategies.
-  // The first one to fire wins; subsequent fires are ignored (this.ended flag).
+  // End-of-call detection — four independent strategies, first one wins.
 
   private watchForEnd(): void {
     if (!this.page) return;
 
-    // Strategy 1: Main frame navigates away from the /j/ path.
-    // Telemost redirects to telemost.yandex.ru/ (or similar) when the host ends
-    // the call or the participant is removed.
+    // Strategy 1: main frame navigates away from /j/.
     this.page.on("framenavigated", (frame: Frame) => {
       if (frame !== this.page?.mainFrame()) return;
       const url = frame.url();
@@ -189,35 +186,54 @@ export class TelemostClient implements MeetingClient {
       }
     });
 
-    // Strategy 2: Poll the DOM for "call ended" overlay text.
-    // Fires for: host_ended, kicked, all participants left.
+    // Strategy 2: DOM text poll — "call ended" / "you were removed" overlays.
     this.endPollTimer = setInterval(async () => {
-      if (!this.page || this.ended) {
-        clearInterval(this.endPollTimer);
-        return;
-      }
+      if (!this.page || this.ended) { clearInterval(this.endPollTimer); return; }
       try {
-        // Runs in the browser — document is available there, not in Node.
-        const bodyText: string = await this.page.evaluate("document.body.innerText");
+        const bodyText: string = await this.page.evaluate(() => document.body.innerText);
         const matched = CALL_ENDED_TEXTS.find((t) => bodyText.includes(t));
         if (matched) {
           log.info({ matched }, "telemost.end_text_detected");
           clearInterval(this.endPollTimer);
-          const reason: EndReason = bodyText.includes("удалили") ? "kicked" : "host_ended";
-          this.triggerEnd(reason);
+          this.triggerEnd(bodyText.includes("удалили") ? "kicked" : "host_ended");
         }
-      } catch {
-        // Page is closing — stop the poll.
-        clearInterval(this.endPollTimer);
-      }
+      } catch { clearInterval(this.endPollTimer); }
     }, END_POLL_INTERVAL_MS);
 
-    // Strategy 3: Chromium tab crashes.
+    // Strategy 3: tab crash.
     this.page.on("crash", () => {
       log.warn("telemost.page_crash");
       clearInterval(this.endPollTimer);
+      clearInterval(this.alonePollTimer);
       this.triggerEnd("host_ended");
     });
+
+    // Strategy 4: bot is alone — participant count button stays at 1 for ALONE_TIMEOUT_MS.
+    // Telemost shows "Участники<N>" in [data-testid="participants-button"].
+    // Strip non-digits to get the count; <= 1 means only the bot is in the room.
+    let aloneStart: number | null = null;
+    this.alonePollTimer = setInterval(async () => {
+      if (!this.page || this.ended) { clearInterval(this.alonePollTimer); return; }
+      try {
+        const btnText: string = await this.page.evaluate(
+          () => document.querySelector('[data-testid="participants-button"]')?.textContent?.trim() ?? "",
+        );
+        const count = parseInt(btnText.replace(/\D/g, ""), 10) || 0;
+        if (count <= 1) {
+          aloneStart ??= Date.now();
+          const aloneMs = Date.now() - aloneStart;
+          log.debug({ count, aloneMs }, "telemost.alone_check");
+          if (aloneMs >= ALONE_TIMEOUT_MS) {
+            log.info({ aloneMs }, "telemost.alone_timeout");
+            clearInterval(this.alonePollTimer);
+            this.triggerEnd("all_left");
+          }
+        } else {
+          if (aloneStart !== null) log.debug({ count }, "telemost.participants_back");
+          aloneStart = null;
+        }
+      } catch { clearInterval(this.alonePollTimer); }
+    }, ALONE_POLL_INTERVAL_MS);
   }
 
   private triggerEnd(reason: EndReason): void {
@@ -231,21 +247,18 @@ export class TelemostClient implements MeetingClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Selector helpers
 
-  /** Try each selector in the list; return the first that exists in DOM. */
   private async findFirst(selectors: readonly string[]) {
     if (!this.page) return null;
     for (const sel of selectors) {
       try {
         const el = await this.page.$(sel);
         if (el) return el;
-      } catch { /* invalid selector for current page state — try next */ }
+      } catch { /* try next */ }
     }
     return null;
   }
 
-  /** Like findFirst but waits up to `timeoutMs` for any selector to appear. */
   private async waitForFirst(selectors: readonly string[], timeoutMs: number) {
     if (!this.page) return null;
     const combined = selectors.join(", ");

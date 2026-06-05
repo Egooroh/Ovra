@@ -21,6 +21,11 @@ export const SELECTORS = {
     'button:has-text("Join")',
   ],
 
+  // Lobby: microphone toggle (left of the join button). Click = mute before joining.
+  lobbyMicToggle: [
+    '[data-testid="turn-off-mic-button"]',
+  ],
+
   // In-call: present only inside the room (not in lobby).
   // Using the red leave button — it only renders after joining.
   inCallIndicator: [

@@ -1,20 +1,17 @@
-// Wires concrete implementations for a worker. Today these are placeholder
-// stubs so the skeleton runs end-to-end without crashing; each is replaced in
-// its own step:
-//   - meeting    -> step 4 (Playwright auto-join), step 9 (selector hardening)
-//   - audio      -> steps 4/5 (PulseAudio sink + ffmpeg)
-//   - transcriber-> step 6 (SpeechKit gRPC)
-//
-// It also allocates the per-call PulseAudio sink + Xvfb display so parallel
-// calls (step 8) never share an audio device.
+// Wires concrete implementations for a worker process.
+// On non-Linux / missing env vars the implementations degrade gracefully:
+//   - FfmpegAudioCapture logs a warning if ffmpeg/PulseAudio isn't available.
+//   - SpeechKitTranscriber is a no-op if YANDEX_API_KEY is not set.
 
 import { CallContext, WorkerEnv } from "../types";
-import { WorkerDeps, AudioCapture, Transcriber, Segment } from "./deps";
+import { WorkerDeps } from "./deps";
 import { TelemostClient } from "./meeting/telemostClient";
+import { FfmpegAudioCapture } from "./audio/ffmpegCapture";
+import { SpeechKitTranscriber } from "./transcriber/speechKitTranscriber";
 import { log } from "../util/log";
 
 function deriveEnv(ctx: CallContext): WorkerEnv {
-  // Unique per call so concurrent workers don't collide on audio/display.
+  // Unique per call so concurrent workers don't collide on audio device / display.
   const slot = process.env.WORKER_SLOT ?? String(process.pid % 1000);
   return {
     callId: ctx.callId,
@@ -23,32 +20,13 @@ function deriveEnv(ctx: CallContext): WorkerEnv {
   };
 }
 
-
-class StubAudio implements AudioCapture {
-  async start(): Promise<void> {
-    log.warn("stub.audio.start — replace in steps 4/5");
-  }
-  onFrame(_cb: (pcm: Buffer) => void): void {}
-  onSilence(_cb: (silent: boolean) => void): void {}
-  async stop(): Promise<void> {}
-}
-
-class StubTranscriber implements Transcriber {
-  async start(): Promise<void> {
-    log.warn("stub.transcriber.start — replace in step 6");
-  }
-  push(_pcm: Buffer): void {}
-  onSegment(_cb: (seg: Segment) => void): void {}
-  async stop(): Promise<void> {}
-}
-
 export async function buildDeps(ctx: CallContext): Promise<WorkerDeps> {
   const env = deriveEnv(ctx);
   log.info({ callId: ctx.callId, env }, "worker.buildDeps");
   return {
     env,
     meeting: new TelemostClient(env),
-    audio: new StubAudio(),
-    transcriber: new StubTranscriber(),
+    audio: new FfmpegAudioCapture(env),
+    transcriber: new SpeechKitTranscriber(),
   };
 }

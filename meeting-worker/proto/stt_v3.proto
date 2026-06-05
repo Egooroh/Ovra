@@ -1,0 +1,99 @@
+// Minimal SpeechKit v3 proto required for RecognizeStreaming.
+// Field numbers and enum values match the official Yandex Cloud API:
+// https://github.com/yandex-cloud/cloudapi/blob/master/yandex/cloud/ai/stt/v3/stt_service.proto
+
+syntax = "proto3";
+
+package yandex.cloud.ai.stt.v3;
+
+service Recognizer {
+  rpc RecognizeStreaming (stream StreamingRequest) returns (stream StreamingResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Request messages
+
+message StreamingRequest {
+  oneof Event {
+    StreamingOptions session_options = 1;
+    AudioChunk chunk = 2;
+  }
+}
+
+message StreamingOptions {
+  RecognitionModelOptions recognition_model = 1;
+  TextNormalizationOptions text_normalization = 4;
+}
+
+message RecognitionModelOptions {
+  string model = 1;
+  AudioFormatOptions audio_format = 2;
+  repeated LanguageRestrictionOptions language_restriction = 4;
+}
+
+message AudioFormatOptions {
+  oneof AudioFormat {
+    RawAudio raw_audio = 1;
+  }
+}
+
+message RawAudio {
+  enum AudioEncoding {
+    AUDIO_ENCODING_UNSPECIFIED = 0;
+    LINEAR16_PCM = 1;
+  }
+  AudioEncoding audio_encoding = 1;
+  int64 sample_rate_hertz = 2;
+  int64 audio_channel_count = 3;
+}
+
+message LanguageRestrictionOptions {
+  enum LanguageRestrictionType {
+    LANGUAGE_RESTRICTION_TYPE_UNSPECIFIED = 0;
+    WHITELIST = 1;
+    BLACKLIST = 2;
+  }
+  LanguageRestrictionType restriction_type = 1;
+  repeated string language_code = 2;
+}
+
+message TextNormalizationOptions {
+  enum TextNormalization {
+    TEXT_NORMALIZATION_UNSPECIFIED = 0;
+    TEXT_NORMALIZATION_ENABLED = 1;
+    TEXT_NORMALIZATION_DISABLED = 2;
+  }
+  TextNormalization text_normalization = 1;
+}
+
+message AudioChunk {
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Response messages
+
+message TimeRange {
+  int64 start_time_ms = 1;
+  int64 end_time_ms = 2;
+}
+
+message Alternative {
+  string text = 1;
+  float confidence = 2;
+  TimeRange audio_time_boundaries = 4;
+}
+
+message AlternativeUpdate {
+  repeated Alternative alternatives = 1;
+  string channel_tag = 2;
+}
+
+message StreamingResponse {
+  oneof Event {
+    AlternativeUpdate partial = 4;
+    AlternativeUpdate final = 6;
+    AlternativeUpdate final_refinement = 7;
+  }
+  string channel_tag = 8;
+}
