@@ -16,7 +16,11 @@ import { config } from "../util/config";
 import { log } from "../util/log";
 import { CallContext, ParentToWorker, WorkerToParent } from "../types";
 
-const WORKER_ENTRY = path.resolve(__dirname, "../worker/index.js");
+// In dev (ts-node) __filename ends with .ts; in prod it ends with .js.
+const IS_DEV = __filename.endsWith(".ts");
+const WORKER_ENTRY = IS_DEV
+  ? path.resolve(__dirname, "../worker/index.ts")
+  : path.resolve(__dirname, "../worker/index.js");
 
 interface Slot {
   callId: string;
@@ -87,6 +91,7 @@ export class Orchestrator {
     if (claimed.count === 0) return; // someone else got it
 
     const child = fork(WORKER_ENTRY, [], {
+      execArgv: IS_DEV ? ["--require", "ts-node/register"] : [],
       env: { ...process.env, CALL_ID: ctx.callId, WORKER_SLOT: String(this.slots.size) },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });

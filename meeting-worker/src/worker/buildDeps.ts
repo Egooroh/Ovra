@@ -9,7 +9,8 @@
 // calls (step 8) never share an audio device.
 
 import { CallContext, WorkerEnv } from "../types";
-import { WorkerDeps, MeetingClient, AudioCapture, Transcriber, Segment } from "./deps";
+import { WorkerDeps, AudioCapture, Transcriber, Segment } from "./deps";
+import { TelemostClient } from "./meeting/telemostClient";
 import { log } from "../util/log";
 
 function deriveEnv(ctx: CallContext): WorkerEnv {
@@ -22,14 +23,6 @@ function deriveEnv(ctx: CallContext): WorkerEnv {
   };
 }
 
-class StubMeeting implements MeetingClient {
-  async join(joinUrl: string): Promise<void> {
-    log.warn({ joinUrl }, "stub.meeting.join — replace in step 4");
-  }
-  onEnd(_cb: (reason: never) => void): void {}
-  async leave(): Promise<void> {}
-  async dispose(): Promise<void> {}
-}
 
 class StubAudio implements AudioCapture {
   async start(): Promise<void> {
@@ -54,7 +47,7 @@ export async function buildDeps(ctx: CallContext): Promise<WorkerDeps> {
   log.info({ callId: ctx.callId, env }, "worker.buildDeps");
   return {
     env,
-    meeting: new StubMeeting(),
+    meeting: new TelemostClient(env),
     audio: new StubAudio(),
     transcriber: new StubTranscriber(),
   };
