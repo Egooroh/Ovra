@@ -58,7 +58,7 @@ class Worker {
       this.deps.meeting.onEnd((reason) => void this.finish(reason));
 
       // 3) Audio -> transcription -> persistence.
-      this.deps.audio.onFrame((pcm) => this.deps.transcriber.push(pcm));
+      this.deps.audio.onFrame((pcm, speaker) => this.deps.transcriber.push(pcm, speaker));
       this.deps.audio.onSilence((silent) => this.handleSilence(silent));
       this.deps.transcriber.onSegment((seg) => void this.persistSegment(seg));
 
@@ -76,6 +76,7 @@ class Worker {
     endMs: number;
     text: string;
     isFinal: boolean;
+    speaker?: string;
   }): Promise<void> {
     if (!seg.isFinal || !seg.text.trim()) return;
     try {
@@ -83,19 +84,23 @@ class Worker {
         where: { callId: this.ctx.callId },
         create: {
           callId: this.ctx.callId,
-          fullText: seg.text,
+          // fullText is built entirely by the raw append below so the first
+          // segment isn't counted twice.
+          fullText: "",
           segments: {
-            create: { startMs: seg.startMs, endMs: seg.endMs, text: seg.text },
+            create: { startMs: seg.startMs, endMs: seg.endMs, text: seg.text, speaker: seg.speaker },
           },
         },
         update: {
-          fullText: { set: undefined } as never,
+          // fullText is appended below via raw SQL; leave it untouched here.
           segments: {
-            create: { startMs: seg.startMs, endMs: seg.endMs, text: seg.text },
+            create: { startMs: seg.startMs, endMs: seg.endMs, text: seg.text, speaker: seg.speaker },
           },
         },
       });
-      await prisma.$executeRaw`UPDATE "Transcript" SET "fullText" = "fullText" || ' ' || ${seg.text}, "updatedAt" = now() WHERE "callId" = ${this.ctx.callId}`;
+      // Append with a separating space only when there's already text, so the
+      // transcript has no leading space and no duplicated first segment.
+      await prisma.$executeRaw`UPDATE "Transcript" SET "fullText" = CASE WHEN "fullText" = '' THEN ${seg.text} ELSE "fullText" || ' ' || ${seg.text} END, "updatedAt" = now() WHERE "callId" = ${this.ctx.callId}`;
       send({
         type: "segment",
         callId: this.ctx.callId,
@@ -125,6 +130,19 @@ class Worker {
       try {
         await this.machine.heartbeat();
         send({ type: "heartbeat", callId: this.ctx.callId, at: Date.now() });
+
+        // External kill switch: if the call row was cancelled (meeting removed
+        // from the calendar, or a manual stop during testing) leave the call
+        // gracefully — click "leave" + close the browser — instead of being
+        // force-killed and lingering as a ghost participant tile.
+        const row = await prisma.call.findUnique({
+          where: { id: this.ctx.callId },
+          select: { status: true },
+        });
+        if (row?.status === "CANCELLED") {
+          log.info({ callId: this.ctx.callId }, "worker.cancel_requested");
+          void this.finish("manual");
+        }
       } catch (err) {
         log.warn({ err: String(err) }, "heartbeat.failed");
       }
@@ -146,14 +164,24 @@ class Worker {
     this.ending = true;
     log.info({ callId: this.ctx.callId, reason }, "worker.ending");
 
-    try {
-      await this.machine.transition("ENDING", { endedAt: new Date() });
-      send({ type: "status", callId: this.ctx.callId, status: "ENDING" });
+    // Physically leave the call FIRST and unconditionally — click "leave" then
+    // close the browser. This must happen regardless of the DB state (e.g. a
+    // CANCELLED row can't transition to ENDING) so the bot never lingers as a
+    // ghost participant tile.
+    await this.deps.audio.stop().catch(() => {});
+    await this.deps.transcriber.stop().catch(() => {});
+    await this.deps.meeting.leave().catch(() => {});
+    await this.deps.meeting.dispose().catch(() => {});
 
-      await this.deps.audio.stop().catch(() => {});
-      await this.deps.transcriber.stop().catch(() => {});
-      await this.deps.meeting.leave().catch(() => {});
-      await this.deps.meeting.dispose().catch(() => {});
+    try {
+      // Best-effort: a call already CANCELLED/DONE/FAILED stays as-is.
+      const status = await this.machine.current().catch(() => null);
+      const terminal = status === "CANCELLED" || status === "DONE" || status === "FAILED";
+
+      if (!terminal) {
+        await this.machine.transition("ENDING", { endedAt: new Date() });
+        send({ type: "status", callId: this.ctx.callId, status: "ENDING" });
+      }
 
       // Генерируем саммари и пишем ./output/{date}_{callId}.json
       // Go-разработчик забирает этот файл и создаёт задачи в YouGile.
@@ -167,12 +195,12 @@ class Worker {
         log.warn({ callId: this.ctx.callId, err: String(err) }, "worker.summary_write_failed"),
       );
 
-      await this.machine.transition("DONE");
+      if (!terminal) await this.machine.transition("DONE");
       send({ type: "ended", callId: this.ctx.callId, reason });
       send({ type: "status", callId: this.ctx.callId, status: "DONE" });
     } catch (err) {
-      await this.crash(err, /*fatal*/ true);
-      return;
+      // The bot already left the call above; a DB error here is non-fatal.
+      log.warn({ callId: this.ctx.callId, err: String(err) }, "worker.finish_db_error");
     } finally {
       this.cleanup();
     }

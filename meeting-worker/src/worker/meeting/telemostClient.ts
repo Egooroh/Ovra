@@ -6,6 +6,7 @@
 //                        real PulseAudio sink so ffmpeg can capture the audio.
 
 import { chromium, Browser, BrowserContext, Page, Frame } from "playwright";
+type PageHook = (page: Page) => Promise<void>;
 import type { MeetingClient } from "../deps";
 import type { EndReason, WorkerEnv } from "../../types";
 import { SELECTORS, CALL_ENDED_TEXTS } from "./selectors";
@@ -29,7 +30,10 @@ export class TelemostClient implements MeetingClient {
   private alonePollTimer?: NodeJS.Timeout;
   private ended = false;
 
-  constructor(private readonly env: WorkerEnv) {}
+  constructor(
+    private readonly env: WorkerEnv,
+    private readonly pageHook?: PageHook,
+  ) {}
 
   async join(joinUrl: string): Promise<void> {
     log.info({ joinUrl, display: this.env.display }, "telemost.launching");
@@ -37,6 +41,10 @@ export class TelemostClient implements MeetingClient {
     this.browser = await this.launch();
     this.context = await this.buildContext();
     this.page = await this.context.newPage();
+
+    if (this.pageHook) {
+      await this.pageHook(this.page);
+    }
 
     this.page.on("pageerror", (err) =>
       log.warn({ err: String(err) }, "telemost.page_error"),

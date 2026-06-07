@@ -18,7 +18,7 @@ const SILENCE_THRESHOLD = 500;
 
 export class FfmpegAudioCapture implements AudioCapture {
   private proc?: ChildProcess;
-  private frameCallbacks: Array<(pcm: Buffer) => void> = [];
+  private frameCallbacks: Array<(pcm: Buffer, speaker?: string) => void> = [];
   private silenceCallbacks: Array<(silent: boolean) => void> = [];
   private isSilent = false;
   private remainder = Buffer.alloc(0);
@@ -93,7 +93,7 @@ export class FfmpegAudioCapture implements AudioCapture {
     }
   }
 
-  onFrame(cb: (pcm: Buffer) => void): void {
+  onFrame(cb: (pcm: Buffer, speaker?: string) => void): void {
     this.frameCallbacks.push(cb);
   }
 

@@ -1,17 +1,17 @@
 // Wires concrete implementations for a worker process.
-// On non-Linux / missing env vars the implementations degrade gracefully:
-//   - FfmpegAudioCapture logs a warning if ffmpeg/PulseAudio isn't available.
-//   - SpeechKitTranscriber is a no-op if YANDEX_API_KEY is not set.
+// On Linux:       FfmpegAudioCapture reads from PulseAudio sink (prod path).
+// On Windows/Mac: WebRtcCapture intercepts RTCPeerConnection tracks in the
+//                 browser and delivers labeled PCM per participant.
 
 import { CallContext, WorkerEnv } from "../types";
 import { WorkerDeps } from "./deps";
 import { TelemostClient } from "./meeting/telemostClient";
 import { FfmpegAudioCapture } from "./audio/ffmpegCapture";
+import { WebRtcCapture } from "./audio/webRtcCapture";
 import { SpeechKitTranscriber } from "./transcriber/speechKitTranscriber";
 import { log } from "../util/log";
 
 function deriveEnv(ctx: CallContext): WorkerEnv {
-  // Unique per call so concurrent workers don't collide on audio device / display.
   const slot = process.env.WORKER_SLOT ?? String(process.pid % 1000);
   return {
     callId: ctx.callId,
@@ -22,11 +22,25 @@ function deriveEnv(ctx: CallContext): WorkerEnv {
 
 export async function buildDeps(ctx: CallContext): Promise<WorkerDeps> {
   const env = deriveEnv(ctx);
-  log.info({ callId: ctx.callId, env }, "worker.buildDeps");
+  log.info({ callId: ctx.callId, env, platform: process.platform }, "worker.buildDeps");
+
+  const isLinux = process.platform === "linux";
+
+  let audio: FfmpegAudioCapture | WebRtcCapture;
+  let pageHook: ((page: import("playwright").Page) => Promise<void>) | undefined;
+
+  if (isLinux) {
+    audio = new FfmpegAudioCapture(env);
+  } else {
+    const rtc = new WebRtcCapture();
+    pageHook = rtc.asPageHook();
+    audio = rtc;
+  }
+
   return {
     env,
-    meeting: new TelemostClient(env),
-    audio: new FfmpegAudioCapture(env),
+    meeting: new TelemostClient(env, pageHook),
+    audio,
     transcriber: new SpeechKitTranscriber(),
   };
 }

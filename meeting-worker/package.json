@@ -18,6 +18,7 @@
     "@grpc/grpc-js": "^1.14.4",
     "@grpc/proto-loader": "^0.8.1",
     "@prisma/client": "^5.22.0",
+    "@yandex-cloud/nodejs-sdk": "^3.2.0",
     "googleapis": "^173.0.0",
     "node-ical": "^0.26.1",
     "playwright": "^1.60.0",

@@ -1,10 +1,14 @@
 // Minimal SpeechKit v3 proto required for RecognizeStreaming.
-// Field numbers and enum values match the official Yandex Cloud API:
+// Field numbers, package name and types match the official Yandex Cloud API:
 // https://github.com/yandex-cloud/cloudapi/blob/master/yandex/cloud/ai/stt/v3/stt_service.proto
+// IMPORTANT: the gRPC package the Yandex Envoy router expects is
+// `speechkit.stt.v3` (NOT `yandex.cloud.ai.stt.v3`). Using the wrong package
+// yields NR / UNIMPLEMENTED. The response field numbers must match exactly or
+// protobuf parsing fails with "invalid wire type".
 
 syntax = "proto3";
 
-package yandex.cloud.ai.stt.v3;
+package speechkit.stt.v3;
 
 service Recognizer {
   rpc RecognizeStreaming (stream StreamingRequest) returns (stream StreamingResponse);
@@ -71,17 +75,40 @@ message AudioChunk {
 }
 
 // ---------------------------------------------------------------------------
-// Response messages
+// Response messages — field numbers MUST match the server wire format.
 
-message TimeRange {
-  int64 start_time_ms = 1;
-  int64 end_time_ms = 2;
+message SessionUuid {
+  string uuid = 1;
+  string user_request_id = 2;
+}
+
+message AudioCursors {
+  int64 received_data_ms = 1;
+  int64 reset_time_ms = 2;
+  int64 partial_time_ms = 3;
+  int64 final_time_ms = 4;
+  int64 final_index = 5;
+  int64 eou_time_ms = 6;
+}
+
+message Word {
+  string text = 1;
+  int64 start_time_ms = 2;
+  int64 end_time_ms = 3;
+}
+
+message LanguageEstimation {
+  string language_code = 1;
+  double probability = 2;
 }
 
 message Alternative {
-  string text = 1;
-  float confidence = 2;
-  TimeRange audio_time_boundaries = 4;
+  repeated Word words = 1;
+  string text = 2;
+  int64 start_time_ms = 3;
+  int64 end_time_ms = 4;
+  double confidence = 5;
+  repeated LanguageEstimation languages = 6;
 }
 
 message AlternativeUpdate {
@@ -89,11 +116,38 @@ message AlternativeUpdate {
   string channel_tag = 2;
 }
 
+message EouUpdate {
+  int64 time_ms = 1;
+}
+
+message FinalRefinement {
+  int64 final_index = 1;
+  AlternativeUpdate normalized_text = 2;
+}
+
+message StatusCode {
+  enum CodeType {
+    CODE_TYPE_UNSPECIFIED = 0;
+    WORKING = 1;
+    WARNING = 2;
+    CLOSED = 3;
+  }
+  CodeType code_type = 1;
+  string message = 2;
+}
+
 message StreamingResponse {
+  SessionUuid session_uuid = 1;
+  AudioCursors audio_cursors = 2;
+  int64 response_wall_time_ms = 3;
+
   oneof Event {
     AlternativeUpdate partial = 4;
-    AlternativeUpdate final = 6;
-    AlternativeUpdate final_refinement = 7;
+    AlternativeUpdate final = 5;
+    EouUpdate eou_update = 6;
+    FinalRefinement final_refinement = 7;
+    StatusCode status_code = 8;
   }
-  string channel_tag = 8;
+
+  string channel_tag = 9;
 }
