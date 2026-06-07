@@ -42,8 +42,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Та же БД — только меняем хост на имя сервиса postgres внутри compose
-      DATABASE_URL: "postgresql://ovra:ovra@postgres:5432/ovra?schema=public"
+      # Та же БД, но СВОЯ схема `meeting` — чтобы Prisma-миграции воркера не
+      # конфликтовали с таблицами Go-бэкенда в схеме public (ошибка P3005).
+      DATABASE_URL: "postgresql://ovra:ovra@postgres:5432/ovra?schema=meeting"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ORCH_POLL_MS: "${ORCH_POLL_MS:-15000}"
       ORCH_JOIN_LEAD_MS: "${ORCH_JOIN_LEAD_MS:-60000}"

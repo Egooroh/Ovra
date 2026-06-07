@@ -2,7 +2,9 @@
 // Source of truth for call state shared between orchestrator and forked workers.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // "native" for local dev; the musl/openssl-3 target is for the Alpine image.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
