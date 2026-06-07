@@ -66,6 +66,22 @@ services:
       # JSON-файлы саммари встреч — общая папка чтобы Go-разработчик мог читать
       - meeting_output:/app/output
 
+  bot:
+    build: ./ovra_bot
+    depends_on:
+      - app
+    environment:
+      # ВНУТРИ compose-сети бэкенд доступен по имени сервиса, не по localhost!
+      BACKEND_URL: "http://app:8080"
+      TENANT_ID: "${TENANT_ID:-ws-demo}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      AI_MODEL: "${AI_MODEL:-}"
+      PROXY_URL: "${PROXY_URL:-}"
+      PM_CHAT_ID: "${PM_CHAT_ID:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    restart: unless-stopped
+
 volumes:
   pgdata:
   meeting_output:
