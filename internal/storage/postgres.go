@@ -118,6 +118,22 @@ func (p *Postgres) GetYougileTokenEnc(ctx context.Context, tenantID string) (str
 	return login, tokenEnc, nil
 }
 
+// SetWorkspaceColumns updates only the board-column ids of a workspace.
+func (p *Postgres) SetWorkspaceColumns(ctx context.Context, tenantID string, c domain.Columns) error {
+	ct, err := p.pool.Exec(ctx, `
+		UPDATE workspaces
+		SET col_todo = $2, col_in_progress = $3, col_review = $4, col_done = $5
+		WHERE id = $1`,
+		tenantID, c.Todo, c.InProgress, c.Review, c.Done)
+	if err != nil {
+		return fmt.Errorf("set workspace columns: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- users ---
 
 func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, error) {

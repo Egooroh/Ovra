@@ -18,6 +18,7 @@ type Repository interface {
 	// Workspaces (read + seed from config).
 	UpsertWorkspace(ctx context.Context, ws domain.Workspace) error
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
+	SetWorkspaceColumns(ctx context.Context, tenantID string, c domain.Columns) error
 
 	// YouGile credentials (set during bot onboarding). The token is stored
 	// encrypted; callers pass/receive ciphertext and use the secret package.

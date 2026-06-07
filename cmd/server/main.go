@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ovra/internal/config"
+	"ovra/internal/integrations/llm"
 	"ovra/internal/integrations/yougile"
 	"ovra/internal/queue"
 	"ovra/internal/secret"
@@ -94,9 +95,21 @@ func main() {
 	q.Subscribe(router.Handle)
 	defer q.Close()
 
+	gateway := httptransport.NewServer(cfg, repo, cipher, yg, tasks, q, log)
+
+	// Optional AI column classifier (OpenRouter). Disabled unless a key is set.
+	if cfg.OpenRouterAPIKey != "" {
+		gateway.SetClassifier(llm.New(llm.Config{
+			APIKey:  cfg.OpenRouterAPIKey,
+			Model:   cfg.OpenRouterModel,
+			BaseURL: cfg.OpenRouterBaseURL,
+		}))
+		log.Info("ai column classifier enabled (openrouter)")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httptransport.NewServer(cfg, repo, cipher, yg, tasks, q, log).Routes(),
+		Handler:           gateway.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

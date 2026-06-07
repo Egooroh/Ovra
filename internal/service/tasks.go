@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"ovra/internal/domain"
@@ -26,6 +27,7 @@ var ErrInvalidStatus = errors.New("service: invalid status")
 type Store interface {
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
 	GetYougileTokenEnc(ctx context.Context, id string) (login string, tokenEnc []byte, err error)
+	ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error)
 	CreateTask(ctx context.Context, t domain.Task) (domain.Task, error)
 	GetTask(ctx context.Context, id string) (domain.Task, error)
 	UpdateTask(ctx context.Context, t domain.Task) (domain.Task, error)
@@ -81,11 +83,16 @@ func (s *Tasks) CreateAndPublish(ctx context.Context, in TaskInput) (domain.Task
 		return domain.Task{}, err
 	}
 
+	// Resolve the assignee before persisting so we can record the internal
+	// assignee_user_id and the YouGile assignment together.
+	assigned, assigneeUserID := s.resolveAssignee(ctx, token, in.TenantID, in.Assignee)
+
 	// Persist first so the task survives a later YouGile failure.
 	task, err := s.store.CreateTask(ctx, domain.Task{
 		TenantID:       in.TenantID,
 		Title:          in.Title,
 		Description:    in.Description,
+		AssigneeUserID: assigneeUserID,
 		Deadline:       in.Deadline,
 		Status:         domain.StatusTodo,
 		ApprovalStatus: domain.ApprovalApproved,
@@ -99,7 +106,7 @@ func (s *Tasks) CreateAndPublish(ctx context.Context, in TaskInput) (domain.Task
 		Title:       in.Title,
 		ColumnID:    ws.Columns.Todo,
 		Description: in.Description,
-		Assigned:    s.resolveAssignee(ctx, token, in.Assignee),
+		Assigned:    assigned,
 	}
 	if in.Deadline != nil {
 		req.Deadline = yougile.DeadlineFromTime(*in.Deadline)
@@ -213,23 +220,50 @@ func (s *Tasks) workspaceToken(ctx context.Context, tenantID string) (string, er
 	return token, nil
 }
 
-// resolveAssignee maps a human name to a YouGile user id. A missing assignee or
-// an unmatched name is not fatal — the card is created unassigned.
-func (s *Tasks) resolveAssignee(ctx context.Context, token, name string) []string {
+// resolveAssignee maps an assignee name to (YouGile user ids for the card,
+// internal assignee_user_id for the DB). It prefers the registered users table
+// (TG ↔ name ↔ YouGile), falling back to matching YouGile members by name.
+// A missing or unmatched assignee is not fatal — the card is created unassigned.
+func (s *Tasks) resolveAssignee(ctx context.Context, token, tenantID, name string) ([]string, *string) {
 	if name == "" {
-		return nil
+		return nil, nil
 	}
+	want := strings.ToLower(strings.TrimSpace(name))
+
+	// 1) Registered users table.
+	if users, err := s.store.ListUsersByTenant(ctx, tenantID); err != nil {
+		s.log.Warn("list registered users", "err", err)
+	} else {
+		for _, u := range users {
+			if strings.ToLower(u.FullName) == want ||
+				strings.ToLower(strings.TrimPrefix(u.TgUsername, "@")) == want {
+				id := u.ID
+				if u.YougileUserID != "" {
+					return []string{u.YougileUserID}, &id
+				}
+				// Known person, but not yet mapped to YouGile — record the
+				// internal assignee and try matching the card by name below.
+				return s.yougileIDByName(ctx, token, name), &id
+			}
+		}
+	}
+
+	// 2) Fallback: match a YouGile member by name (legacy behaviour).
+	return s.yougileIDByName(ctx, token, name), nil
+}
+
+// yougileIDByName returns the YouGile user id whose realName matches name.
+func (s *Tasks) yougileIDByName(ctx context.Context, token, name string) []string {
 	users, err := s.yg.ListUsers(ctx, token)
 	if err != nil {
-		s.log.Warn("list users for assignee", "assignee", name, "err", err)
+		s.log.Warn("list yougile users for assignee", "assignee", name, "err", err)
 		return nil
 	}
-	u, ok := yougile.FindUserByName(users, name)
-	if !ok {
-		s.log.Warn("assignee not found in yougile", "assignee", name)
-		return nil
+	if u, ok := yougile.FindUserByName(users, name); ok {
+		return []string{u.ID}
 	}
-	return []string{u.ID}
+	s.log.Warn("assignee not found in yougile", "assignee", name)
+	return nil
 }
 
 // orDefault returns def when s is empty.

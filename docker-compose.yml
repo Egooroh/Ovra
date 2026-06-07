@@ -26,6 +26,10 @@ services:
       WORKSPACE_CONFIG: "/app/workspace.yaml"
       YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
       APP_SECRET: "${APP_SECRET:-dev-only-change-me}"
+      # Optional AI column classifier — set OPENROUTER_API_KEY to enable.
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
+      OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       - "8080:8080"

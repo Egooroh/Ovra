@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"ovra/internal/columns"
 	"ovra/internal/config"
 	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
@@ -32,8 +33,13 @@ type Server struct {
 	yg     *yougile.Client
 	tasks  TaskService
 	queue  queue.Queue
-	log    *slog.Logger
+	// classifier is the optional AI column fallback; nil = dictionary+ordinal only.
+	classifier columns.Classifier
+	log        *slog.Logger
 }
+
+// SetClassifier wires the optional AI column classifier (used by board/resolve).
+func (s *Server) SetClassifier(c columns.Classifier) { s.classifier = c }
 
 // NewServer builds a Server with its dependencies. repo, cipher, tasks and queue
 // may be nil until fully wired (cipher/tasks require APP_SECRET).
@@ -46,6 +52,9 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/credentials", s.handleSetCredentials)
+	mux.HandleFunc("POST /v1/workspaces/{tenant}/board/resolve", s.handleResolveBoard)
+	mux.HandleFunc("POST /v1/workspaces/{tenant}/users", s.handleRegisterUser)
+	mux.HandleFunc("GET /v1/workspaces/{tenant}/users", s.handleListUsers)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)

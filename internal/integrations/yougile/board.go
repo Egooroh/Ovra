@@ -15,6 +15,12 @@ type Project struct {
 	Title string `json:"title"`
 }
 
+// Board is a board inside a project.
+type Board struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
 // Column is a board column (a task status lane).
 type Column struct {
 	ID    string `json:"id"`
@@ -49,6 +55,22 @@ func (c *Client) CreateBoard(ctx context.Context, token, title, projectID string
 func (c *Client) CreateColumn(ctx context.Context, token, title, boardID string) (string, error) {
 	return c.createNamed(ctx, token, "/columns",
 		map[string]any{"title": title, "boardId": boardID}, "column")
+}
+
+// ListBoards returns the boards of a project. GET /boards?projectId=...
+func (c *Client) ListBoards(ctx context.Context, token, projectID string) ([]Board, error) {
+	if token == "" {
+		return nil, errors.New("yougile: missing token")
+	}
+	path := "/boards"
+	if projectID != "" {
+		path += "?projectId=" + url.QueryEscape(projectID)
+	}
+	var env listEnvelope[Board]
+	if err := c.do(ctx, "GET", path, token, nil, &env); err != nil {
+		return nil, err
+	}
+	return env.Content, nil
 }
 
 // ListColumns returns the columns of a board. GET /columns?boardId=...

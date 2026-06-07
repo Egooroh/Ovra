@@ -15,13 +15,17 @@ import (
 type fakeStore struct {
 	ws       domain.Workspace
 	tokenEnc []byte
-	task     domain.Task // returned by GetTask
+	users    []domain.User // returned by ListUsersByTenant
+	task     domain.Task   // returned by GetTask
 	created  domain.Task
 	updated  domain.Task
 }
 
 func (f *fakeStore) GetWorkspace(context.Context, string) (domain.Workspace, error) {
 	return f.ws, nil
+}
+func (f *fakeStore) ListUsersByTenant(context.Context, string) ([]domain.User, error) {
+	return f.users, nil
 }
 func (f *fakeStore) GetYougileTokenEnc(context.Context, string) (string, []byte, error) {
 	return "host@x.io", f.tokenEnc, nil
@@ -121,6 +125,31 @@ func TestCreateAndPublishNoCredentials(t *testing.T) {
 	_, err := svc.CreateAndPublish(context.Background(), TaskInput{TenantID: "ws-1", Title: "x"})
 	if !errors.Is(err, ErrNoCredentials) {
 		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+}
+
+func TestCreateAndPublishUsesRegisteredUser(t *testing.T) {
+	store := &fakeStore{ws: domain.Workspace{ID: "ws-1"}}
+	store.ws.Columns.Todo = "col-todo"
+	// Registered member: chat name "Ваня" maps to YouGile user "yg-77".
+	store.users = []domain.User{{ID: "u-int", FullName: "Ваня", YougileUserID: "yg-77"}}
+	yg := &fakeYG{} // ListUsers not needed — table hit wins
+
+	svc, cipher := newService(t, store, yg)
+	enc, _ := cipher.Seal("tok")
+	store.tokenEnc = enc
+
+	_, err := svc.CreateAndPublish(context.Background(), TaskInput{
+		TenantID: "ws-1", Title: "t", Assignee: "ваня",
+	})
+	if err != nil {
+		t.Fatalf("CreateAndPublish: %v", err)
+	}
+	if len(yg.lastReq.Assigned) != 1 || yg.lastReq.Assigned[0] != "yg-77" {
+		t.Fatalf("card assignee = %v, want yg-77", yg.lastReq.Assigned)
+	}
+	if store.created.AssigneeUserID == nil || *store.created.AssigneeUserID != "u-int" {
+		t.Fatalf("internal assignee_user_id = %v, want u-int", store.created.AssigneeUserID)
 	}
 }
 

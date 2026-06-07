@@ -22,6 +22,10 @@ type fakeRepo struct {
 	tasks      []domain.Task
 	setLogin   string
 	setEnc     []byte
+	tokenEnc   []byte         // returned by GetYougileTokenEnc
+	savedCols  domain.Columns // captured by SetWorkspaceColumns
+	users      []domain.User  // returned by ListUsersByTenant
+	upserted   domain.User    // captured by UpsertUser
 }
 
 func newFakeRepo(ids ...string) *fakeRepo {
@@ -47,15 +51,21 @@ func (f *fakeRepo) SetYougileCredentials(_ context.Context, _ string, login stri
 
 // Unused-by-these-tests methods to satisfy storage.Repository.
 func (f *fakeRepo) UpsertWorkspace(context.Context, domain.Workspace) error { return nil }
-func (f *fakeRepo) GetYougileTokenEnc(context.Context, string) (string, []byte, error) {
-	return "", nil, nil
+func (f *fakeRepo) SetWorkspaceColumns(_ context.Context, _ string, c domain.Columns) error {
+	f.savedCols = c
+	return nil
 }
-func (f *fakeRepo) UpsertUser(context.Context, domain.User) (domain.User, error) {
-	return domain.User{}, nil
+func (f *fakeRepo) GetYougileTokenEnc(context.Context, string) (string, []byte, error) {
+	return "", f.tokenEnc, nil
+}
+func (f *fakeRepo) UpsertUser(_ context.Context, u domain.User) (domain.User, error) {
+	u.ID = "user-1"
+	f.upserted = u
+	return u, nil
 }
 func (f *fakeRepo) GetUser(context.Context, string) (domain.User, error) { return domain.User{}, nil }
 func (f *fakeRepo) ListUsersByTenant(context.Context, string) ([]domain.User, error) {
-	return nil, nil
+	return f.users, nil
 }
 func (f *fakeRepo) CreateTask(context.Context, domain.Task) (domain.Task, error) {
 	return domain.Task{}, nil

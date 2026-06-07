@@ -23,6 +23,12 @@ type Config struct {
 	YougileAPIToken string
 	// AppSecret is the passphrase that encrypts per-workspace secrets at rest.
 	AppSecret string
+	// OpenRouter* configure the optional AI column classifier. When the API key
+	// is empty the classifier is disabled and the resolver uses dictionary +
+	// ordinal only.
+	OpenRouterAPIKey  string
+	OpenRouterModel   string
+	OpenRouterBaseURL string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -38,8 +44,11 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		HTTPAddr:        env("HTTP_ADDR", ":8080"),
 		DatabaseURL:     env("DATABASE_URL", "postgres://ovra:ovra@localhost:5433/ovra?sslmode=disable"),
-		YougileAPIToken: os.Getenv("YOUGILE_API_TOKEN"),
-		AppSecret:       os.Getenv("APP_SECRET"),
+		YougileAPIToken:   os.Getenv("YOUGILE_API_TOKEN"),
+		AppSecret:         os.Getenv("APP_SECRET"),
+		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterModel:   os.Getenv("OPENROUTER_MODEL"),
+		OpenRouterBaseURL: os.Getenv("OPENROUTER_BASE_URL"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")
