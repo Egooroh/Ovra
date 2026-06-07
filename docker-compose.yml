@@ -74,16 +74,18 @@ services:
     build: ./ovra_bot
     depends_on:
       - app
+    # Секреты бота (TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, TENANT_ID, ...) берутся
+    # из собственного .env бота. Файл должен существовать (см. ovra_bot/.env).
+    env_file:
+      - ./ovra_bot/.env
     environment:
-      # ВНУТРИ compose-сети бэкенд доступен по имени сервиса, не по localhost!
+      # Перекрываем сетевое значение: внутри compose-сети бэкенд — по имени сервиса,
+      # а не localhost (это значение важнее того, что лежит в .env бота).
       BACKEND_URL: "http://app:8080"
-      TENANT_ID: "${TENANT_ID:-ws-demo}"
-      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
-      AI_MODEL: "${AI_MODEL:-}"
-      PROXY_URL: "${PROXY_URL:-}"
-      PM_CHAT_ID: "${PM_CHAT_ID:-}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    # PROXY_URL в .env бота должен указывать на host.docker.internal (а не 127.0.0.1),
+    # чтобы из контейнера дотянуться до прокси на хост-машине.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:
