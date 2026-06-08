@@ -34,12 +34,27 @@ export class Orchestrator {
   private healthTimer?: NodeJS.Timeout;
   private stopping = false;
 
+  private processed = 0;
+  private failed = 0;
+  private statusTimer?: NodeJS.Timeout;
+
   async run(): Promise<void> {
     log.info("orchestrator.start");
     await this.recoverOrphans();
     this.pollTimer = setInterval(() => void this.tick(), config.orchestrator.pollIntervalMs);
     this.healthTimer = setInterval(() => void this.checkHealth(), config.orchestrator.heartbeatTimeoutMs / 2);
+    // Emit a status snapshot every minute so silence in the logs means trouble.
+    this.statusTimer = setInterval(() => this.logStatus(), 60_000);
     await this.tick();
+  }
+
+  private logStatus(): void {
+    log.info({
+      active: this.slots.size,
+      processed: this.processed,
+      failed: this.failed,
+      slots: [...this.slots.keys()],
+    }, "orchestrator.status");
   }
 
   /** On startup, any row left mid-flight from a previous crash gets reset. */
@@ -110,8 +125,14 @@ export class Orchestrator {
 
   private onWorkerMessage(slot: Slot, m: WorkerToParent): void {
     if (m.type === "heartbeat") slot.lastHeartbeat = m.at;
-    if (m.type === "ended") log.info({ callId: m.callId, reason: m.reason }, "orchestrator.call_ended");
-    if (m.type === "error" && m.fatal) log.error({ callId: m.callId, msg: m.message }, "orchestrator.worker_fatal");
+    if (m.type === "ended") {
+      this.processed++;
+      log.info({ callId: m.callId, reason: m.reason }, "orchestrator.call_ended");
+    }
+    if (m.type === "error" && m.fatal) {
+      this.failed++;
+      log.error({ callId: m.callId, msg: m.message }, "orchestrator.worker_fatal");
+    }
   }
 
   private onWorkerExit(slot: Slot, code: number | null): void {
@@ -139,6 +160,7 @@ export class Orchestrator {
     this.stopping = true;
     clearInterval(this.pollTimer);
     clearInterval(this.healthTimer);
+    clearInterval(this.statusTimer);
     for (const slot of this.slots.values()) {
       const msg: ParentToWorker = { type: "shutdown" };
       slot.child.send(msg);

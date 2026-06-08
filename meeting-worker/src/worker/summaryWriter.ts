@@ -56,6 +56,7 @@ export async function writeSummary(
   }
 
   log.info({ callId, chars: fullText.length }, "summaryWriter: starting");
+  const llmStart = Date.now();
 
   const { summary, tasks } = fullText.length <= CHUNK_CHARS
     ? await summarizeDirect(fullText, title ?? "")
@@ -94,8 +95,13 @@ export async function writeSummary(
   }
 
   const result = await res.json().catch(() => ({})) as { created?: number; failures?: string[] };
-  log.info({ callId, created: result.created ?? 0, failures: result.failures?.length ?? 0 },
-    "summaryWriter: pushed summary to backend");
+  log.info({
+    callId,
+    created: result.created ?? 0,
+    failures: result.failures?.length ?? 0,
+    llmMs: Date.now() - llmStart,
+    tasks: tasks.length,
+  }, "summaryWriter: done");
 }
 
 // ── стратегии суммаризации ────────────────────────────────────────────────────

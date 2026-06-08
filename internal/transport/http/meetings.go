@@ -62,6 +62,8 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	svcMetrics.SummariesReceived.Add(1)
+
 	created := 0
 	var failures []string
 	for _, t := range req.Tasks {
@@ -89,9 +91,15 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("ingest meeting task",
 				"call_id", req.CallID, "title", t.Title, "err", err)
 			failures = append(failures, t.Title+": "+err.Error())
+			svcMetrics.TasksFailed.Add(1)
 			continue
 		}
+		svcMetrics.TasksCreated.Add(1)
 		created++
+	}
+
+	if len(failures) > 0 && created == 0 {
+		svcMetrics.SummariesFailed.Add(1)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
