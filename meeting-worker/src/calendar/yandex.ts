@@ -108,9 +108,15 @@ function buildReportXml(from: Date, to: Date): string {
 export class YandexCalendarProvider implements CalendarProvider {
   readonly name = "yandex";
 
+  /** Per-account CalDAV creds. When omitted, falls back to env (single-tenant). */
+  constructor(
+    private readonly username?: string,
+    private readonly password?: string,
+  ) {}
+
   async fetchEvents(from: Date, to: Date): Promise<CalendarEvent[]> {
-    const username = process.env.YANDEX_CALDAV_USERNAME ?? "";
-    const password = process.env.YANDEX_CALDAV_PASSWORD ?? "";
+    const username = this.username ?? process.env.YANDEX_CALDAV_USERNAME ?? "";
+    const password = this.password ?? process.env.YANDEX_CALDAV_PASSWORD ?? "";
     const auth = basicAuth(username, password);
 
     // Step 1: current-user-principal

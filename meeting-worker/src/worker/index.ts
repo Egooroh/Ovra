@@ -188,6 +188,7 @@ class Worker {
       await writeSummary(
         prisma,
         this.ctx.callId,
+        this.ctx.organizationId,
         this.ctx.title ?? null,
         this.ctx.startsAt,
         new Date(),

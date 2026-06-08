@@ -18,10 +18,13 @@ export class GoogleCalendarProvider implements CalendarProvider {
   readonly name = "google";
 
   private readonly calendarIds: string[];
+  /** Service-account JSON (path or inline). When omitted, falls back to env. */
+  private readonly saJson?: string;
 
-  constructor(calendarIds: string[]) {
+  constructor(calendarIds: string[], saJson?: string) {
     if (calendarIds.length === 0) throw new Error("GoogleCalendarProvider: no calendar IDs");
     this.calendarIds = calendarIds;
+    this.saJson = saJson;
   }
 
   async fetchEvents(from: Date, to: Date): Promise<CalendarEvent[]> {
@@ -71,8 +74,9 @@ export class GoogleCalendarProvider implements CalendarProvider {
   }
 
   private async buildAuth() {
-    const raw = process.env.GOOGLE_SA_JSON;
-    if (!raw) throw new Error("GOOGLE_SA_JSON is not set");
+    // Per-account credentials take precedence; env is the single-tenant fallback.
+    const raw = this.saJson ?? process.env.GOOGLE_SA_JSON;
+    if (!raw) throw new Error("Google service-account JSON not provided (account creds or GOOGLE_SA_JSON)");
 
     // Support both: path to JSON file and inline JSON string
     let keyFileOrJson: string | object;

@@ -25,6 +25,13 @@ export const config = {
     heartbeatTimeoutMs: num("ORCH_HEARTBEAT_TIMEOUT_MS", 45_000),
     /** Max relaunch attempts per call before giving up. */
     maxAttempts: num("ORCH_MAX_ATTEMPTS", 2),
+    /**
+     * Fairness cap: max concurrent workers a single tenant (organization) may
+     * hold at once. Prevents one company that fires 20 calls at 10:00 from
+     * monopolizing all maxConcurrentCalls slots while other tenants wait.
+     * Always <= maxConcurrentCalls (the global ceiling still applies).
+     */
+    maxCallsPerTenant: num("ORCH_MAX_CALLS_PER_TENANT", 2),
   },
 
   worker: {
@@ -54,6 +61,13 @@ export const config = {
     lookaheadMs: num("CALENDAR_LOOKAHEAD_MS", 2 * 60 * 60_000),
     /** How far back to look (catch already-started meetings). */
     lookbackMs: num("CALENDAR_LOOKBACK_MS", 2 * 60 * 60_000),
+    /**
+     * Key for encrypting per-tenant calendar credentials at rest in the
+     * CalendarAccount table. 32 bytes, hex (64 chars) or base64. Kept only in
+     * the environment — never in the DB. Required only when CalendarAccount
+     * rows are used (multi-tenant mode); the single-tenant env path ignores it.
+     */
+    credKey: process.env.CALENDAR_CRED_KEY ?? "",
   },
 
   openrouter: {

@@ -14,7 +14,7 @@ async function main(): Promise<void> {
 
   const call = await prisma.call.findUniqueOrThrow({
     where: { id: callId },
-    select: { title: true, startsAt: true, endedAt: true },
+    select: { organizationId: true, title: true, startsAt: true, endedAt: true },
   });
 
   console.log(`re-running summary for call ${callId} ("${call.title}")`);
@@ -22,6 +22,7 @@ async function main(): Promise<void> {
   await writeSummary(
     prisma,
     callId,
+    call.organizationId,
     call.title ?? null,
     call.startsAt,
     call.endedAt ?? new Date(),

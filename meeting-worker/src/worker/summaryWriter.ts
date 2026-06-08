@@ -40,6 +40,7 @@ export interface MeetingSummaryPayload {
 export async function writeSummary(
   prisma: PrismaClient,
   callId: string,
+  organizationId: string | null,
   title: string | null,
   startedAt: Date,
   endedAt: Date,
@@ -68,8 +69,12 @@ export async function writeSummary(
     return;
   }
 
+  // Prefer the call's own tenant; fall back to the process-wide env tenant for
+  // single-tenant deployments (where organizationId is null).
+  const effectiveTenant = organizationId ?? tenantId;
+
   const payload: MeetingSummaryPayload = {
-    tenant_id: tenantId,
+    tenant_id: effectiveTenant,
     call_id: callId,
     title: title ?? "",
     started_at: startedAt.toISOString(),
