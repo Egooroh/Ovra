@@ -60,5 +60,16 @@ export const config = {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     model: process.env.OPENROUTER_MODEL ?? "qwen/qwen3.5-35b-a3b",
     baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+    /** Max simultaneous LLM requests across all workers. Prevents 429s under load. */
+    concurrency: num("OPENROUTER_CONCURRENCY", 5),
+  },
+
+  backend: {
+    /** Go backend base URL, e.g. http://backend:8080 */
+    url: process.env.BACKEND_URL ?? "",
+    /** Shared secret sent as Authorization: Bearer <token> */
+    workerSecret: process.env.WORKER_SECRET ?? "",
+    /** Tenant (workspace) id this worker belongs to */
+    tenantId: process.env.BACKEND_TENANT_ID ?? "",
   },
 } as const;

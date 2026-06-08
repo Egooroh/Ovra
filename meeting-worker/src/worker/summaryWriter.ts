@@ -2,27 +2,21 @@
 //
 // После завершения созвона читает транскрипт из Postgres,
 // просит LLM (OpenRouter) сделать краткое саммари + список задач,
-// и пишет JSON-файл в ./output/{date}_{callId}.json
+// и отправляет результат HTTP POST на Go-бэкенд (POST /v1/meetings/summary).
 //
 // Для длинных созвонов (> CHUNK_CHARS) используется map-reduce:
 // транскрипт бьётся на куски, каждый суммаризируется отдельно,
 // потом финальный запрос объединяет всё в одно саммари и дедублицирует задачи.
-//
-// Это граница ответственности TS-воркера: дальше файл забирает Go-разработчик.
 
-import fs from "node:fs/promises";
-import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { config } from "../util/config";
 import { log } from "../util/log";
-
-const OUTPUT_DIR = path.resolve(process.cwd(), "output");
 
 // Транскрипты короче этого порога обрабатываются одним запросом.
 // ~60k символов ≈ 15k токенов — комфортно для одного прохода.
 const CHUNK_CHARS = 60_000;
 
-// ── типы выходного файла ──────────────────────────────────────────────────────
+// ── типы payload ──────────────────────────────────────────────────────────────
 
 export interface MeetingTask {
   title: string;
@@ -30,14 +24,15 @@ export interface MeetingTask {
   deadline: string; // ISO-8601 или пустая строка
 }
 
-export interface MeetingSummaryFile {
+export interface MeetingSummaryPayload {
+  tenant_id: string;
   call_id: string;
   title: string;
   started_at: string;  // ISO-8601
   ended_at: string;    // ISO-8601
   summary: string;
   tasks: MeetingTask[];
-  transcript: string;  // полный текст для Go-разработчика
+  transcript: string;
 }
 
 // ── основная функция ──────────────────────────────────────────────────────────
@@ -66,7 +61,14 @@ export async function writeSummary(
     ? await summarizeDirect(fullText, title ?? "")
     : await summarizeChunked(fullText, title ?? "");
 
-  const payload: MeetingSummaryFile = {
+  const { url, workerSecret, tenantId } = config.backend;
+  if (!url) {
+    log.warn({ callId }, "summaryWriter: BACKEND_URL not set, skipping push");
+    return;
+  }
+
+  const payload: MeetingSummaryPayload = {
+    tenant_id: tenantId,
     call_id: callId,
     title: title ?? "",
     started_at: startedAt.toISOString(),
@@ -76,14 +78,24 @@ export async function writeSummary(
     transcript: fullText,
   };
 
-  await fs.mkdir(OUTPUT_DIR, { recursive: true });
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (workerSecret) headers["Authorization"] = `Bearer ${workerSecret}`;
 
-  const date = startedAt.toISOString().slice(0, 10);
-  const filename = `${date}_${callId}.json`;
-  const filepath = path.join(OUTPUT_DIR, filename);
+  const res = await fetch(`${url}/v1/meetings/summary`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30_000),
+  });
 
-  await fs.writeFile(filepath, JSON.stringify(payload, null, 2), "utf8");
-  log.info({ callId, filepath }, "summaryWriter: wrote meeting summary");
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`backend responded ${res.status}: ${body}`);
+  }
+
+  const result = await res.json().catch(() => ({})) as { created?: number; failures?: string[] };
+  log.info({ callId, created: result.created ?? 0, failures: result.failures?.length ?? 0 },
+    "summaryWriter: pushed summary to backend");
 }
 
 // ── стратегии суммаризации ────────────────────────────────────────────────────
@@ -197,6 +209,29 @@ ${JSON.stringify(tasks, null, 2)}
 
 // ── OpenRouter API ────────────────────────────────────────────────────────────
 
+// Semaphore: caps simultaneous LLM requests so bursts of parallel map-reduce
+// chunks don't exhaust the OpenRouter rate limit.
+class Semaphore {
+  private slots: number;
+  private queue: Array<() => void> = [];
+
+  constructor(concurrency: number) {
+    this.slots = Math.max(1, concurrency);
+  }
+
+  async acquire(): Promise<void> {
+    if (this.slots > 0) { this.slots--; return; }
+    await new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) { next(); } else { this.slots++; }
+  }
+}
+
+const llmSemaphore = new Semaphore(config.openrouter.concurrency);
+
 const RETRY_DELAYS_MS = [1_000, 3_000, 9_000];
 
 async function callLlm(prompt: string): Promise<LlmResult> {
@@ -215,11 +250,14 @@ async function callLlm(prompt: string): Promise<LlmResult> {
       await new Promise((r) => setTimeout(r, delay));
     }
 
+    await llmSemaphore.acquire();
     try {
       return await callLlmOnce(prompt, baseUrl, apiKey, model);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       log.warn({ attempt: attempt + 1, err: lastError.message }, "summaryWriter: LLM attempt failed");
+    } finally {
+      llmSemaphore.release();
     }
   }
 

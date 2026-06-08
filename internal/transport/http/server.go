@@ -62,6 +62,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /v1/events", s.handlePublishEvent)
+	mux.HandleFunc("POST /v1/meetings/summary", s.handleIngestMeeting)
 	// Outermost first: recover panics, then log every request.
 	return s.recoverPanic(s.requestLogger(mux))
 }
