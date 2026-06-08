@@ -523,9 +523,13 @@ bot.on("text", async (ctx) => {
         const ws = await resolveTenant(ctx.chat.id).catch(() => null);
         if (ws) {
             try {
-                const result = await scheduleCallInOvra(ws.tenant_id, telemostUrl);
+                const startsAt = parseCallTime(message.text);
+                const result = await scheduleCallInOvra(ws.tenant_id, telemostUrl, undefined, startsAt);
                 if (result.duplicate) {
                     await ctx.reply('📅 Эта встреча уже запланирована — бот придёт.');
+                } else if (startsAt) {
+                    const localTime = formatLocalTime(startsAt);
+                    await ctx.reply(`📅 Принял! Бот придёт на созвон в ${localTime} и пришлёт саммари.`);
                 } else {
                     await ctx.reply('📅 Принял! Бот придёт на этот созвон и пришлёт саммари.');
                 }
@@ -795,6 +799,74 @@ bot.action(/^cal_skip:(.+)$/, async (ctx) => {
         { parse_mode: 'Markdown' }
     );
 });
+
+// ---- Парсинг времени созвона из сообщения ----
+
+// Timezone for call scheduling — must match DEADLINE_TZ on the backend.
+const CALL_TZ = process.env.DEADLINE_TZ ?? 'Europe/Moscow';
+
+// Parses a time mention like "в 17:00", "в 17.00", "в 17 часов", "в 5pm"
+// from a message and returns an ISO-8601 string in the configured timezone.
+// Returns undefined if no time found.
+function parseCallTime(text: string): string | undefined {
+    // Match "в 17:00", "в 17.00", "в 17-00", "в 17 00", "в 17 часов/час"
+    const m = text.match(/\bв\s+(\d{1,2})(?:[:\.\-](\d{2}))?(?:\s*часов?|ч\.?)?\b/i);
+    if (!m) return undefined;
+
+    const hours = parseInt(m[1]!, 10);
+    const minutes = parseInt(m[2] ?? '0', 10);
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return undefined;
+
+    // Build a date in the target timezone for today.
+    const now = new Date();
+    // Format today's date parts in the target TZ.
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: CALL_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(now);
+
+    const get = (type: string) => parts.find(p => p.type === type)?.value ?? '0';
+    let year = parseInt(get('year'), 10);
+    let month = parseInt(get('month'), 10);
+    let day = parseInt(get('day'), 10);
+    const currentHour = parseInt(get('hour'), 10);
+
+    // If the requested time has already passed today, schedule for tomorrow.
+    if (hours < currentHour || (hours === currentHour && minutes <= parseInt(get('minute'), 10))) {
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tp = new Intl.DateTimeFormat('en-CA', {
+            timeZone: CALL_TZ,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(tomorrow);
+        year = parseInt(tp.find(p => p.type === 'year')?.value ?? '0', 10);
+        month = parseInt(tp.find(p => p.type === 'month')?.value ?? '0', 10);
+        day = parseInt(tp.find(p => p.type === 'day')?.value ?? '0', 10);
+    }
+
+    // Convert local time in CALL_TZ to UTC ISO string.
+    // We do this by formatting a UTC date that matches the local time.
+    const localStr = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:00`;
+    // Find the UTC offset at that moment in the target timezone.
+    const probe = new Date(`${localStr}Z`);
+    const offsetMin = (probe.getTime() - new Date(new Intl.DateTimeFormat('en-CA', {
+        timeZone: CALL_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(probe) + 'Z').getTime()) / 60000;
+
+    const utc = new Date(probe.getTime() - offsetMin * 60000);
+    return utc.toISOString();
+}
+
+function formatLocalTime(iso: string): string {
+    return new Intl.DateTimeFormat('ru-RU', {
+        timeZone: CALL_TZ,
+        hour: '2-digit', minute: '2-digit',
+        timeZoneName: 'short',
+    }).format(new Date(iso));
+}
 
 // ---- Саммари созвона и подтверждение задач из встречи ----
 

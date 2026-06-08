@@ -93,6 +93,7 @@ services:
       # Перекрываем сетевое значение: внутри compose-сети бэкенд — по имени сервиса,
       # а не localhost (это значение важнее того, что лежит в .env бота).
       BACKEND_URL: "http://app:8080"
+      DEADLINE_TZ: "${DEADLINE_TZ:-Europe/Moscow}"
     # PROXY_URL в .env бота должен указывать на host.docker.internal (а не 127.0.0.1),
     # чтобы из контейнера дотянуться до прокси на хост-машине.
     extra_hosts:
