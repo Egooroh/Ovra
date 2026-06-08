@@ -41,6 +41,11 @@ type Config struct {
 	// e.g. http://meeting-worker:3001. Used to forward Telemost links for scheduling.
 	// Empty → the /v1/workspaces/{tenant}/calls endpoint returns 503.
 	MeetingWorkerURL string
+	// BotInternalURL is the base URL of the Telegram bot's internal HTTP server,
+	// e.g. http://bot:3000. When set, meeting summaries are forwarded there for
+	// per-task user confirmation instead of being auto-created in YouGile.
+	// Empty → tasks are created automatically (legacy behaviour).
+	BotInternalURL string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -64,6 +69,7 @@ func Load() (*Config, error) {
 		DedupThreshold:   envFloat("DEDUP_SIMILARITY", 0.4),
 		WorkerSecret:     os.Getenv("WORKER_SECRET"),
 		MeetingWorkerURL: os.Getenv("MEETING_WORKER_URL"),
+		BotInternalURL:   os.Getenv("BOT_INTERNAL_URL"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")

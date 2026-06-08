@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bytes"
+	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -28,9 +31,19 @@ type ingestTaskInput struct {
 	Deadline string `json:"deadline"` // ISO-8601 or empty
 }
 
-// handleIngestMeeting receives a finished meeting summary from the TS worker and
-// creates the extracted tasks in YouGile. Authentication uses the shared
-// WORKER_SECRET; if the secret is empty auth is skipped (dev mode only).
+// meetingDoneNotification is the payload sent to the bot's internal endpoint.
+type meetingDoneNotification struct {
+	ChatID   string            `json:"chat_id"`
+	TenantID string            `json:"tenant_id"`
+	Title    string            `json:"title"`
+	Summary  string            `json:"summary"`
+	Tasks    []ingestTaskInput `json:"tasks"`
+}
+
+// handleIngestMeeting receives a finished meeting summary from the TS worker.
+// When BOT_INTERNAL_URL is configured the tasks are forwarded to the bot for
+// per-task user confirmation; otherwise they are created in YouGile directly
+// (legacy behaviour).
 func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.WorkerSecret != "" {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -40,7 +53,7 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.tasks == nil {
+	if s.tasks == nil && s.cfg.BotInternalURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "task publishing disabled: APP_SECRET not set")
 		return
 	}
@@ -56,13 +69,33 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loc := workspaceLocation("")
+	chatID := ""
 	if s.repo != nil {
 		if ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID); err == nil {
 			loc = workspaceLocation(ws.Timezone)
+			chatID = ws.ChatID
 		}
 	}
 
 	svcMetrics.SummariesReceived.Add(1)
+
+	// If the bot URL is configured and we have a chat ID, forward to the bot for
+	// interactive per-task confirmation in the group chat.
+	if s.cfg.BotInternalURL != "" && chatID != "" {
+		go s.notifyBotMeetingDone(req, chatID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"call_id":  req.CallID,
+			"pending":  len(req.Tasks),
+			"via_bot":  true,
+		})
+		return
+	}
+
+	// Fallback: create tasks automatically (no bot confirmation).
+	if s.tasks == nil {
+		writeError(w, http.StatusServiceUnavailable, "task publishing disabled: APP_SECRET not set")
+		return
+	}
 
 	created := 0
 	var failures []string
@@ -76,7 +109,7 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 			Description: req.Summary,
 			Assignee:    t.Assignee,
 			Source:      domain.SourceMeeting,
-			Force:       true, // meeting tasks are always created; dedup is not appropriate here
+			Force:       true,
 		}
 		if t.Deadline != "" {
 			if dl, hasTime, err := parseDeadline(t.Deadline, loc); err == nil {
@@ -107,4 +140,49 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 		"created":  created,
 		"failures": failures,
 	})
+}
+
+// notifyBotMeetingDone POSTs the meeting summary and task list to the bot's
+// internal HTTP endpoint so the bot can send per-task confirmation messages to
+// the group chat. Runs in a goroutine; errors are logged but not fatal.
+func (s *Server) notifyBotMeetingDone(req ingestMeetingRequest, chatID string) {
+	notification := meetingDoneNotification{
+		ChatID:   chatID,
+		TenantID: req.TenantID,
+		Title:    req.Title,
+		Summary:  req.Summary,
+		Tasks:    req.Tasks,
+	}
+
+	body, err := json.Marshal(notification)
+	if err != nil {
+		s.log.Error("notifyBotMeetingDone: marshal", "err", err)
+		return
+	}
+
+	httpReq, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		s.cfg.BotInternalURL+"/internal/meeting-done",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		s.log.Error("notifyBotMeetingDone: build request", "err", err)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if s.cfg.WorkerSecret != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.cfg.WorkerSecret)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		s.log.Error("notifyBotMeetingDone: POST failed", "url", s.cfg.BotInternalURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		s.log.Error("notifyBotMeetingDone: unexpected status", "status", resp.StatusCode)
+	}
 }
