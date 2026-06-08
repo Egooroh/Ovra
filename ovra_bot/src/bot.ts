@@ -20,18 +20,65 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
     }
 });
 
-// Читаем ID из .env. Если там пустая строка "", переменная станет undefined
 let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || undefined;
 
 const recentMessages = new Map<number, string>();
 const pendingTasks = new Map<string, ParsedTask>();
+
+// --- СИСТЕМА ПРИВЯЗКИ ПОЛЬЗОВАТЕЛЕЙ (Маппинг) ---
+const MAPPING_FILE = path.resolve(process.cwd(), 'users.json');
+let userMapping: Record<string, string> = {};
+
+// Загружаем сохраненные теги при запуске
+if (fs.existsSync(MAPPING_FILE)) {
+    userMapping = JSON.parse(fs.readFileSync(MAPPING_FILE, 'utf-8'));
+}
+
+function saveMapping() {
+    fs.writeFileSync(MAPPING_FILE, JSON.stringify(userMapping, null, 2));
+}
+// ------------------------------------------------
 
 function cleanUpCache() {
     if (recentMessages.size > 1000) recentMessages.clear();
     if (pendingTasks.size > 500) pendingTasks.clear();
 }
 
-// 0. Команда /start (Захват Telegram ID и запись в .env)
+// Приветственное сообщение при добавлении бота в новую группу
+bot.on('my_chat_member', async (ctx) => {
+    const status = ctx.myChatMember.new_chat_member.status;
+    // Если бота только что добавили в группу или сделали админом
+    if (status === 'member' || status === 'administrator') {
+        await ctx.reply(
+            `👋 Всем привет! Я Ovra PM-Bot.\n\n` +
+            `Чтобы я мог корректно назначать на вас задачи, мне нужно связать ваши Telegram-теги с аккаунтами YouGile.\n\n` +
+            `Пожалуйста, каждый напишите прямо в этот чат команду:\n` +
+            `\`/bind Ваше Имя В YouGile\`\n\n` +
+            `Пример: \`/bind Иван Иванов\``, 
+            { parse_mode: 'Markdown' }
+        );
+    }
+});
+
+// Команда для привязки тега к имени YouGile
+bot.command('bind', async (ctx) => {
+    const username = ctx.from.username;
+    if (!username) {
+        return ctx.reply('❌ У вас не установлен @username в Telegram. Установите его в настройках профиля.');
+    }
+
+    const yougileName = ctx.message.text.replace('/bind', '').trim();
+    if (!yougileName) {
+        return ctx.reply('❌ Напишите ваше имя из YouGile после команды. Пример: `/bind Иван Иванов`', { parse_mode: 'Markdown' });
+    }
+
+    const tag = `@${username.toLowerCase()}`;
+    userMapping[tag] = yougileName;
+    saveMapping();
+
+    await ctx.reply(`✅ Отлично! Теперь ваш тег ${tag} привязан к сотруднику "${yougileName}" в YouGile.`);
+});
+
 bot.command('start', async (ctx) => {
     if (ctx.chat.type === 'private') {
         activePmChatId = ctx.chat.id;
@@ -40,7 +87,6 @@ bot.command('start', async (ctx) => {
             const envPath = path.resolve(process.cwd(), '.env');
             let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
             
-            // Заменяем пустую строку (или старый ID) на новый ID
             if (envContent.includes('PM_CHAT_ID=')) {
                 envContent = envContent.replace(/PM_CHAT_ID=.*/, `PM_CHAT_ID="${activePmChatId}"`);
             } else {
@@ -94,7 +140,6 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
     }
 }
 
-// Команда /stats
 bot.command('stats', async (ctx) => {
     const loadingMessage = await ctx.reply('⏳ Собираю статистику...');
 
@@ -118,6 +163,7 @@ bot.command('stats', async (ctx) => {
                       `⚙️ **Go-Бэкенд:** ${backendStatus}\n` +
                       `🧠 **AI (OpenRouter):** ${aiStatus}\n` +
                       `👤 **Личка ПМа:** ${pmStatus}\n\n` +
+                      `👥 **Привязано юзеров:** ${Object.keys(userMapping).length}\n` +
                       `📦 **Сообщений в кэше:** ${recentMessages.size}\n` +
                       `⏳ **Задач в ожидании:** ${pendingTasks.size}`;
 
@@ -133,10 +179,7 @@ bot.command('stats', async (ctx) => {
 bot.on("text", async (ctx) => {
     const message = ctx.message;
     recentMessages.set(message.message_id, message.text);
-
-    if (isPotentialTask(message.text)) {
-        await processTaskAndConfirm(ctx, message.text);
-    }
+    // ИИ отключен для обычных сообщений в целях экономии токенов
 });
 
 bot.on("message_reaction", async (ctx) => {
@@ -166,7 +209,15 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
     try {
         await ctx.answerCbQuery('Отправляю в Ovra Backend...');
 
-        const assignee = taskData.assignee || "ee880055543@mail.ru";
+        // Ищем тег в нашей базе. Если находим — подменяем на Имя из YouGile.
+        let assignee = taskData.assignee || "";
+        if (assignee.startsWith('@')) {
+            const mappedName = userMapping[assignee.toLowerCase()];
+            if (mappedName) {
+                assignee = mappedName;
+            }
+        }
+
         const title = taskData.title || "Новая задача из Telegram";
         const description = taskData.description || "";
 
@@ -175,6 +226,7 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
         await ctx.editMessageText(
             `✅ **Задача создана!**\n` +
             `Название: ${title}\n` +
+            `Исполнитель: ${assignee || 'Не указан'}\n` +
             `ID в YouGile: \`${result.yougile_task_id || 'Неизвестно'}\``, 
             { parse_mode: 'Markdown' }
         );
