@@ -30,6 +30,7 @@ services:
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
       OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      DEDUP_SIMILARITY: "${DEDUP_SIMILARITY:-0.4}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       - "8080:8080"

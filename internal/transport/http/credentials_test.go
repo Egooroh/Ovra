@@ -77,6 +77,12 @@ func (f *fakeRepo) UpdateTask(context.Context, domain.Task) (domain.Task, error)
 func (f *fakeRepo) ListTasksByTenant(context.Context, string) ([]domain.Task, error) {
 	return f.tasks, nil
 }
+func (f *fakeRepo) FindSimilarOpenTasks(context.Context, string, string, float64) ([]domain.Task, error) {
+	return nil, nil
+}
+func (f *fakeRepo) ListOpenTasks(context.Context, string, int) ([]domain.Task, error) {
+	return nil, nil
+}
 
 // testServer wires a Server with a real cipher and a YouGile client pointed at
 // the given fake API base URL.

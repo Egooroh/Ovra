@@ -268,6 +268,56 @@ func (p *Postgres) ListTasksByTenant(ctx context.Context, tenantID string) ([]do
 	return out, rows.Err()
 }
 
+// FindSimilarOpenTasks returns active tasks similar to title (exact-insensitive
+// or pg_trgm similarity >= threshold), most similar first.
+func (p *Postgres) FindSimilarOpenTasks(ctx context.Context, tenantID, title string, threshold float64) ([]domain.Task, error) {
+	rows, err := p.pool.Query(ctx, taskSelect+`
+		WHERE tenant_id = $1
+		  AND status <> 'done'
+		  AND approval_status <> 'rejected'
+		  AND (lower(title) = lower($2) OR similarity(title, $2) >= $3)
+		ORDER BY similarity(title, $2) DESC
+		LIMIT 5`, tenantID, title, threshold)
+	if err != nil {
+		return nil, fmt.Errorf("find similar tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan similar task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListOpenTasks returns up to limit active tasks of the tenant, newest first.
+func (p *Postgres) ListOpenTasks(ctx context.Context, tenantID string, limit int) ([]domain.Task, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := p.pool.Query(ctx, taskSelect+`
+		WHERE tenant_id = $1 AND status <> 'done' AND approval_status <> 'rejected'
+		ORDER BY created_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list open tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan open task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // --- helpers ---
 
 // row is satisfied by both *pgx.Row (QueryRow) and pgx.Rows (Query).

@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 
@@ -29,6 +30,9 @@ type Config struct {
 	OpenRouterAPIKey  string
 	OpenRouterModel   string
 	OpenRouterBaseURL string
+	// DedupThreshold is the pg_trgm similarity (0..1) above which a new task is
+	// treated as a possible duplicate. <= 0 disables deduplication.
+	DedupThreshold float64
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -49,6 +53,7 @@ func Load() (*Config, error) {
 		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
 		OpenRouterModel:   os.Getenv("OPENROUTER_MODEL"),
 		OpenRouterBaseURL: os.Getenv("OPENROUTER_BASE_URL"),
+		DedupThreshold:    envFloat("DEDUP_SIMILARITY", 0.4),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")
@@ -99,6 +104,16 @@ func (c *Config) WorkspaceByID(id string) (domain.Workspace, bool) {
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envFloat parses key as a float, returning def when unset or invalid.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
 	return def
 }

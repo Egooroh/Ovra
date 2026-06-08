@@ -16,7 +16,9 @@ type fakeStore struct {
 	ws       domain.Workspace
 	tokenEnc []byte
 	users    []domain.User // returned by ListUsersByTenant
-	task     domain.Task   // returned by GetTask
+	similar   []domain.Task // returned by FindSimilarOpenTasks
+	openTasks []domain.Task // returned by ListOpenTasks
+	task      domain.Task   // returned by GetTask
 	created  domain.Task
 	updated  domain.Task
 }
@@ -26,6 +28,12 @@ func (f *fakeStore) GetWorkspace(context.Context, string) (domain.Workspace, err
 }
 func (f *fakeStore) ListUsersByTenant(context.Context, string) ([]domain.User, error) {
 	return f.users, nil
+}
+func (f *fakeStore) FindSimilarOpenTasks(context.Context, string, string, float64) ([]domain.Task, error) {
+	return f.similar, nil
+}
+func (f *fakeStore) ListOpenTasks(context.Context, string, int) ([]domain.Task, error) {
+	return f.openTasks, nil
 }
 func (f *fakeStore) GetYougileTokenEnc(context.Context, string) (string, []byte, error) {
 	return "host@x.io", f.tokenEnc, nil
@@ -74,7 +82,7 @@ func newService(t *testing.T, store Store, yg YougileAPI) (*Tasks, *secret.Ciphe
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewTasks(store, yg, cipher, log), cipher
+	return NewTasks(store, yg, cipher, 0.4, log), cipher
 }
 
 func TestCreateAndPublishHappyPath(t *testing.T) {
@@ -125,6 +133,97 @@ func TestCreateAndPublishNoCredentials(t *testing.T) {
 	_, err := svc.CreateAndPublish(context.Background(), TaskInput{TenantID: "ws-1", Title: "x"})
 	if !errors.Is(err, ErrNoCredentials) {
 		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+}
+
+type fakeJudge struct {
+	out      []domain.Task
+	err      error
+	gotPool  []domain.Task
+	gotTitle string
+}
+
+func (f *fakeJudge) JudgeDuplicates(_ context.Context, title, _ string, cands []domain.Task) ([]domain.Task, error) {
+	f.gotTitle, f.gotPool = title, cands
+	return f.out, f.err
+}
+
+func TestFindDuplicatesJudgeSupersedesShortlist(t *testing.T) {
+	store := &fakeStore{
+		similar:   []domain.Task{{ID: "trgm-hit"}},                                  // layer 2 shortlist
+		openTasks: []domain.Task{{ID: "a", Title: "X"}, {ID: "b", Title: "Y"}},       // judge pool
+	}
+	svc, _ := newService(t, store, &fakeYG{})
+	j := &fakeJudge{out: []domain.Task{{ID: "b"}}} // judge confirms only "b"
+	svc.SetDuplicateJudge(j)
+
+	dups, err := svc.FindDuplicates(context.Background(), "ws-1", "new", "desc")
+	if err != nil {
+		t.Fatalf("FindDuplicates: %v", err)
+	}
+	if len(dups) != 1 || dups[0].ID != "b" {
+		t.Fatalf("dups = %+v, want judge verdict [b]", dups)
+	}
+	if len(j.gotPool) != 2 || j.gotTitle != "new" {
+		t.Fatalf("judge got pool=%d title=%q", len(j.gotPool), j.gotTitle)
+	}
+}
+
+func TestFindDuplicatesJudgeErrorFallsBackToShortlist(t *testing.T) {
+	store := &fakeStore{
+		similar:   []domain.Task{{ID: "trgm-hit"}},
+		openTasks: []domain.Task{{ID: "a", Title: "X"}},
+	}
+	svc, _ := newService(t, store, &fakeYG{})
+	svc.SetDuplicateJudge(&fakeJudge{err: errors.New("provider down")})
+
+	dups, err := svc.FindDuplicates(context.Background(), "ws-1", "new", "")
+	if err != nil {
+		t.Fatalf("FindDuplicates: %v", err)
+	}
+	if len(dups) != 1 || dups[0].ID != "trgm-hit" {
+		t.Fatalf("expected trgm fallback, got %+v", dups)
+	}
+}
+
+func TestCreateAndPublishDetectsDuplicate(t *testing.T) {
+	store := &fakeStore{ws: domain.Workspace{ID: "ws-1"}}
+	store.similar = []domain.Task{{ID: "existing", Title: "Починить вход"}}
+	svc, cipher := newService(t, store, &fakeYG{})
+	enc, _ := cipher.Seal("tok")
+	store.tokenEnc = enc
+
+	_, err := svc.CreateAndPublish(context.Background(), TaskInput{
+		TenantID: "ws-1", Title: "Исправить авторизацию",
+	})
+	var dup *DuplicateError
+	if !errors.As(err, &dup) {
+		t.Fatalf("err = %v, want *DuplicateError", err)
+	}
+	if len(dup.Candidates) != 1 || dup.Candidates[0].ID != "existing" {
+		t.Fatalf("candidates = %+v", dup.Candidates)
+	}
+	if store.created.ID != "" {
+		t.Fatal("task must not be persisted on duplicate")
+	}
+}
+
+func TestCreateAndPublishForceBypassesDedup(t *testing.T) {
+	store := &fakeStore{ws: domain.Workspace{ID: "ws-1"}}
+	store.ws.Columns.Todo = "col-todo"
+	store.similar = []domain.Task{{ID: "existing", Title: "дубль"}}
+	svc, cipher := newService(t, store, &fakeYG{})
+	enc, _ := cipher.Seal("tok")
+	store.tokenEnc = enc
+
+	_, err := svc.CreateAndPublish(context.Background(), TaskInput{
+		TenantID: "ws-1", Title: "дубль", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("force should bypass dedup: %v", err)
+	}
+	if store.created.ID == "" {
+		t.Fatal("task should be created when forced")
 	}
 }
 

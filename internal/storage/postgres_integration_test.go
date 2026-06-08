@@ -77,6 +77,50 @@ func TestCredentialRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFindSimilarOpenTasks(t *testing.T) {
+	ctx := context.Background()
+	p := repo(t)
+
+	const tenant = "test-dedup-ws"
+	if err := p.UpsertWorkspace(ctx, domain.Workspace{ID: tenant, ChatID: "c", Name: "Dedup"}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+	t.Cleanup(func() { _, _ = p.Pool().Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, tenant) })
+
+	if _, err := p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Поправить баг авторизации"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// Layer 1: exact, case-insensitive.
+	got, err := p.FindSimilarOpenTasks(ctx, tenant, "поправить баг авторизации", 0.3)
+	if err != nil {
+		t.Fatalf("find similar: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected case-insensitive match")
+	}
+
+	// A clearly different title must not match.
+	none, err := p.FindSimilarOpenTasks(ctx, tenant, "Подготовить квартальный отчёт по продажам", 0.3)
+	if err != nil {
+		t.Fatalf("find similar: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected no match, got %d", len(none))
+	}
+
+	// Done tasks are excluded.
+	dt, _ := p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Закрытая штука"})
+	dt.Status = domain.StatusDone
+	if _, err := p.UpdateTask(ctx, dt); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+	doneRes, _ := p.FindSimilarOpenTasks(ctx, tenant, "Закрытая штука", 0.3)
+	if len(doneRes) != 0 {
+		t.Fatalf("done task should be excluded, got %d", len(doneRes))
+	}
+}
+
 func TestTaskCRUD(t *testing.T) {
 	ctx := context.Background()
 	p := repo(t)

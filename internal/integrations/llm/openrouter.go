@@ -77,61 +77,63 @@ type chatResponse struct {
 // Classify implements columns.Classifier. It returns a status per input title,
 // aligned by index; unknown titles get "".
 func (c *Client) Classify(ctx context.Context, titles []string) ([]string, error) {
-	if c.cfg.APIKey == "" {
-		return nil, fmt.Errorf("llm: missing OPENROUTER_API_KEY")
-	}
 	if len(titles) == 0 {
 		return nil, nil
 	}
-
 	titlesJSON, _ := json.Marshal(titles)
+	content, err := c.complete(ctx, systemPrompt, string(titlesJSON))
+	if err != nil {
+		return nil, err
+	}
+	return parseStatuses(content, len(titles))
+}
+
+// complete sends a system+user chat request and returns the assistant content.
+func (c *Client) complete(ctx context.Context, system, user string) (string, error) {
+	if c.cfg.APIKey == "" {
+		return "", fmt.Errorf("llm: missing OPENROUTER_API_KEY")
+	}
 	reqBody, err := json.Marshal(chatRequest{
 		Model:       c.cfg.Model,
 		Temperature: 0,
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: string(titlesJSON)},
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal request: %w", err)
+		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		c.cfg.BaseURL+"/chat/completions", bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("llm: new request: %w", err)
+		return "", fmt.Errorf("llm: new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
-	// Optional OpenRouter attribution headers.
 	req.Header.Set("HTTP-Referer", "https://github.com/Egooroh/Ovra")
 	req.Header.Set("X-Title", "Ovra")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: request: %w", err)
+		return "", fmt.Errorf("llm: request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("llm: status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("llm: status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var cr chatResponse
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return nil, fmt.Errorf("llm: decode response: %w", err)
+		return "", fmt.Errorf("llm: decode response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return nil, fmt.Errorf("llm: empty choices")
+		return "", fmt.Errorf("llm: empty choices")
 	}
-
-	statuses, err := parseStatuses(cr.Choices[0].Message.Content, len(titles))
-	if err != nil {
-		return nil, err
-	}
-	return statuses, nil
+	return cr.Choices[0].Message.Content, nil
 }
 
 // parseStatuses extracts a JSON string array from the model's reply (tolerating

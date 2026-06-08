@@ -35,4 +35,11 @@ type Repository interface {
 	GetTask(ctx context.Context, id string) (domain.Task, error)
 	UpdateTask(ctx context.Context, t domain.Task) (domain.Task, error)
 	ListTasksByTenant(ctx context.Context, tenantID string) ([]domain.Task, error)
+	// FindSimilarOpenTasks returns active (not done/rejected) tasks of the
+	// tenant whose title equals (case-insensitive) or is trigram-similar to
+	// title at >= threshold. Used for deduplication.
+	FindSimilarOpenTasks(ctx context.Context, tenantID, title string, threshold float64) ([]domain.Task, error)
+	// ListOpenTasks returns up to limit active (not done/rejected) tasks of the
+	// tenant, newest first — the candidate pool for the semantic dedup judge.
+	ListOpenTasks(ctx context.Context, tenantID string, limit int) ([]domain.Task, error)
 }

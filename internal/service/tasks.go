@@ -28,6 +28,8 @@ type Store interface {
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
 	GetYougileTokenEnc(ctx context.Context, id string) (login string, tokenEnc []byte, err error)
 	ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error)
+	FindSimilarOpenTasks(ctx context.Context, tenantID, title string, threshold float64) ([]domain.Task, error)
+	ListOpenTasks(ctx context.Context, tenantID string, limit int) ([]domain.Task, error)
 	CreateTask(ctx context.Context, t domain.Task) (domain.Task, error)
 	GetTask(ctx context.Context, id string) (domain.Task, error)
 	UpdateTask(ctx context.Context, t domain.Task) (domain.Task, error)
@@ -41,17 +43,43 @@ type YougileAPI interface {
 	CompleteTask(ctx context.Context, token, id string) error
 }
 
-// Tasks publishes approved tasks to YouGile.
-type Tasks struct {
-	store  Store
-	yg     YougileAPI
-	cipher *secret.Cipher
-	log    *slog.Logger
+// maxJudgePool bounds how many open tasks the semantic judge inspects per check.
+const maxJudgePool = 50
+
+// DuplicateJudge is the optional semantic dedup layer (layer 4). It decides which
+// candidates are the same task as (title, description) — even when worded
+// differently. nil disables it (only layers 1–2 run).
+type DuplicateJudge interface {
+	JudgeDuplicates(ctx context.Context, title, description string, candidates []domain.Task) ([]domain.Task, error)
 }
 
+// DuplicateError signals that similar active tasks already exist. The handler
+// surfaces it as 409 so the host can confirm before forcing creation.
+type DuplicateError struct {
+	Candidates []domain.Task
+}
+
+func (e *DuplicateError) Error() string {
+	return fmt.Sprintf("service: %d similar task(s) already exist", len(e.Candidates))
+}
+
+// Tasks publishes approved tasks to YouGile.
+type Tasks struct {
+	store        Store
+	yg           YougileAPI
+	cipher       *secret.Cipher
+	dupThreshold float64        // pg_trgm similarity threshold; <= 0 disables layers 1–2
+	judge        DuplicateJudge // optional semantic dedup (layer 4); nil = off
+	log          *slog.Logger
+}
+
+// SetDuplicateJudge wires the optional semantic dedup judge (layer 4).
+func (s *Tasks) SetDuplicateJudge(j DuplicateJudge) { s.judge = j }
+
 // NewTasks builds the task service. cipher is required (it decrypts the token).
-func NewTasks(store Store, yg YougileAPI, cipher *secret.Cipher, log *slog.Logger) *Tasks {
-	return &Tasks{store: store, yg: yg, cipher: cipher, log: log}
+// dupThreshold (0..1) controls deduplication; <= 0 disables it.
+func NewTasks(store Store, yg YougileAPI, cipher *secret.Cipher, dupThreshold float64, log *slog.Logger) *Tasks {
+	return &Tasks{store: store, yg: yg, cipher: cipher, dupThreshold: dupThreshold, log: log}
 }
 
 // TaskInput is the data a task is created from (typically produced by Claude
@@ -63,6 +91,42 @@ type TaskInput struct {
 	Assignee    string // human name; mapped to a YouGile user id
 	Deadline    *time.Time
 	Source      string // chat | meeting
+	Force       bool   // skip the duplicate check (host confirmed)
+}
+
+// FindDuplicates finds active tasks that duplicate (title, description).
+// Layers 1–2 (normalized + pg_trgm) produce a shortlist; if a semantic judge
+// (layer 4) is configured, it inspects the tenant's open-task pool and its
+// verdict supersedes the shortlist. Judge/pool failures fall back to layers 1–2.
+func (s *Tasks) FindDuplicates(ctx context.Context, tenantID, title, description string) ([]domain.Task, error) {
+	var shortlist []domain.Task
+	if s.dupThreshold > 0 {
+		sl, err := s.store.FindSimilarOpenTasks(ctx, tenantID, title, s.dupThreshold)
+		if err != nil {
+			return nil, err
+		}
+		shortlist = sl
+	}
+
+	if s.judge == nil {
+		return shortlist, nil
+	}
+
+	pool, err := s.store.ListOpenTasks(ctx, tenantID, maxJudgePool)
+	if err != nil {
+		s.log.Warn("dedup pool fetch failed; using trgm shortlist", "err", err)
+		return shortlist, nil
+	}
+	if len(pool) == 0 {
+		return shortlist, nil
+	}
+
+	confirmed, err := s.judge.JudgeDuplicates(ctx, title, description, pool)
+	if err != nil {
+		s.log.Warn("dedup judge failed; using trgm shortlist", "err", err)
+		return shortlist, nil
+	}
+	return confirmed, nil
 }
 
 // CreateAndPublish persists the task as approved, creates the YouGile card and
@@ -71,6 +135,15 @@ type TaskInput struct {
 func (s *Tasks) CreateAndPublish(ctx context.Context, in TaskInput) (domain.Task, error) {
 	if in.TenantID == "" || in.Title == "" {
 		return domain.Task{}, errors.New("service: tenant_id and title are required")
+	}
+
+	// Deduplication (layers 1–2). A check failure is non-fatal — log and proceed.
+	if !in.Force {
+		if dups, err := s.FindDuplicates(ctx, in.TenantID, in.Title, in.Description); err != nil {
+			s.log.Warn("dedup check failed; proceeding", "err", err)
+		} else if len(dups) > 0 {
+			return domain.Task{}, &DuplicateError{Candidates: dups}
+		}
 	}
 
 	ws, err := s.store.GetWorkspace(ctx, in.TenantID)

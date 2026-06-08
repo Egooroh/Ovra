@@ -116,6 +116,20 @@ func TestCreateTaskUnknownWorkspace(t *testing.T) {
 	}
 }
 
+func TestCreateTaskDuplicateReturns409(t *testing.T) {
+	pub := &fakePublisher{err: &service.DuplicateError{
+		Candidates: []domain.Task{{ID: "dup-1", Title: "Похожая задача"}},
+	}}
+	h := taskServer(t, pub)
+	rec := post(t, h, "/v1/tasks", `{"tenant_id":"ws-1","title":"Похожая задача"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "dup-1") {
+		t.Fatalf("expected duplicate in body, got %s", rec.Body.String())
+	}
+}
+
 func TestCreateTaskPersistedButCardFailed(t *testing.T) {
 	// Task has an ID (persisted) but publishing errored → 502 with the task.
 	pub := &fakePublisher{

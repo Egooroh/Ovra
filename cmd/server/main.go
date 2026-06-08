@@ -82,7 +82,7 @@ func main() {
 	var taskSvc *service.Tasks
 	var tasks httptransport.TaskService
 	if cipher != nil {
-		taskSvc = service.NewTasks(repo, yg, cipher, log)
+		taskSvc = service.NewTasks(repo, yg, cipher, cfg.DedupThreshold, log)
 		tasks = taskSvc
 	}
 
@@ -97,14 +97,19 @@ func main() {
 
 	gateway := httptransport.NewServer(cfg, repo, cipher, yg, tasks, q, log)
 
-	// Optional AI column classifier (OpenRouter). Disabled unless a key is set.
+	// Optional OpenRouter AI, shared by the column classifier and the dedup judge.
+	// Disabled unless a key is set.
 	if cfg.OpenRouterAPIKey != "" {
-		gateway.SetClassifier(llm.New(llm.Config{
+		ai := llm.New(llm.Config{
 			APIKey:  cfg.OpenRouterAPIKey,
 			Model:   cfg.OpenRouterModel,
 			BaseURL: cfg.OpenRouterBaseURL,
-		}))
-		log.Info("ai column classifier enabled (openrouter)")
+		})
+		gateway.SetClassifier(ai)
+		if taskSvc != nil {
+			taskSvc.SetDuplicateJudge(ai)
+		}
+		log.Info("openrouter ai enabled (column classifier + dedup judge)")
 	}
 
 	srv := &http.Server{

@@ -18,6 +18,7 @@ type createTaskRequest struct {
 	Description string `json:"description"`
 	Assignee    string `json:"assignee"` // human name; mapped to a YouGile user
 	Deadline    string `json:"deadline"` // RFC3339, optional
+	Force       bool   `json:"force"`    // create even if a duplicate is detected
 }
 
 // taskResponse is the JSON view of a persisted task.
@@ -58,6 +59,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Assignee:    req.Assignee,
 		Source:      domain.SourceChat,
+		Force:       req.Force,
 	}
 	if req.Deadline != "" {
 		dl, err := time.Parse(time.RFC3339, req.Deadline)
@@ -151,7 +153,14 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 // writeCreateTaskError maps a publish failure to an HTTP status.
 func (s *Server) writeCreateTaskError(w http.ResponseWriter, task domain.Task, err error) {
+	var dup *service.DuplicateError
 	switch {
+	case errors.As(err, &dup):
+		// Similar tasks exist — let the host decide (resend with force:true).
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      "similar task(s) already exist; resend with \"force\":true to create anyway",
+			"duplicates": toTaskResponses(dup.Candidates),
+		})
 	case errors.Is(err, storage.ErrNotFound):
 		writeError(w, http.StatusNotFound, "workspace not found")
 	case errors.Is(err, service.ErrNoCredentials):
@@ -168,6 +177,15 @@ func (s *Server) writeCreateTaskError(w http.ResponseWriter, task domain.Task, e
 		s.log.Error("create task", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+// toTaskResponses maps a slice of tasks to their JSON view.
+func toTaskResponses(ts []domain.Task) []taskResponse {
+	out := make([]taskResponse, len(ts))
+	for i, t := range ts {
+		out[i] = toTaskResponse(t)
+	}
+	return out
 }
 
 // toTaskResponse converts a domain.Task to its JSON view.
