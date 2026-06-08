@@ -8,6 +8,10 @@
 .env.bak
 *.bak
 
+# Debug / temp artifacts
+telemost_*.png
+meeting-worker/diag.js
+
 # Logs
 *.log
 

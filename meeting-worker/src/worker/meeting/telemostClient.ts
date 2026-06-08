@@ -53,11 +53,7 @@ export class TelemostClient implements MeetingClient {
     log.info({ joinUrl }, "telemost.navigating");
     await this.page.goto(joinUrl, { waitUntil: "networkidle", timeout: LOBBY_TIMEOUT_MS });
 
-    await this.clickContinueInBrowser();
-    await this.fillNameIfPrompted();
-    await this.muteMicInLobby();
-    await this.clickJoin();
-    await this.waitUntilInCall();
+    await this.enterMeeting();
 
     log.info({ joinUrl }, "telemost.in_call");
     this.watchForEnd();
@@ -99,23 +95,16 @@ export class TelemostClient implements MeetingClient {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--use-fake-ui-for-media-stream",
+      "--use-fake-device-for-media-stream",
     ];
 
     if (isLinux) {
-      args.push(
-        `--alsa-output-device=pulse`,
-        `--disable-audio-output`,
-      );
-    } else {
-      args.push("--use-fake-device-for-media-stream");
+      args.push(`--alsa-output-device=pulse`);
     }
 
     return chromium.launch({
-      headless: !isLinux,
+      headless: true,
       args,
-      env: isLinux
-        ? { ...process.env as Record<string, string>, DISPLAY: this.env.display }
-        : undefined,
       timeout: LOBBY_TIMEOUT_MS,
     });
   }
@@ -131,13 +120,45 @@ export class TelemostClient implements MeetingClient {
     });
   }
 
-  private async clickContinueInBrowser(): Promise<void> {
-    const btn = await this.waitForFirst(SELECTORS.continueInBrowser, LOBBY_TIMEOUT_MS);
-    if (!btn) throw new Error("Telemost: 'Продолжить в браузере' button not found");
-    await btn.click();
-    const joinSel = SELECTORS.joinButton.join(", ");
-    await this.page!.waitForSelector(joinSel, { timeout: LOBBY_TIMEOUT_MS });
-    log.info("telemost.continue_in_browser_clicked");
+  // Unified entry flow handling both old UI (interstitial → lobby → join)
+  // and new UI ("Продолжить в браузере" directly connects to the call).
+  private async enterMeeting(): Promise<void> {
+    // Step 1: Click "Продолжить в браузере" if present (old interstitial OR new direct-join button).
+    const continueBtn = await this.waitForFirst(SELECTORS.continueInBrowser, LOBBY_TIMEOUT_MS);
+    if (!continueBtn) {
+      await this.page!.screenshot({ path: "/app/output/telemost_no_continue_btn.png", fullPage: true }).catch(() => {});
+      throw new Error("Telemost: 'Продолжить в браузере' button not found");
+    }
+
+    await continueBtn.click();
+    log.info("telemost.continue_clicked");
+
+    // In headless mode the interstitial transitions to a lobby (SPA route change):
+    // name input + "Подключиться" button appear without page navigation.
+    // Fill name, then click join.
+    const joinBtn = await this.waitForFirst(SELECTORS.joinButton, JOIN_TIMEOUT_MS);
+    if (!joinBtn) {
+      await this.page!.screenshot({ path: "/app/output/telemost_stuck.png", fullPage: true }).catch(() => {});
+      throw new Error("Telemost: 'Подключиться' button not found after clicking 'Продолжить в браузере'");
+    }
+
+    await this.fillNameIfPrompted();
+    await this.muteMicInLobby();
+
+    await joinBtn.click();
+    log.info("telemost.join_clicked");
+
+    // Wait until the join button disappears — we are now inside the call.
+    await this.page!.waitForFunction(
+      () => !document.querySelector('[data-testid="enter-conference-button"]'),
+      undefined,
+      { timeout: JOIN_TIMEOUT_MS, polling: 500 },
+    ).catch(async () => {
+      await this.page!.screenshot({ path: "/app/output/telemost_stuck.png", fullPage: true }).catch(() => {});
+      throw new Error("Telemost: join button did not disappear after clicking 'Подключиться'");
+    });
+
+    log.info("telemost.in_meeting");
   }
 
   private async fillNameIfPrompted(): Promise<void> {
@@ -146,24 +167,6 @@ export class TelemostClient implements MeetingClient {
       await input.fill(BOT_NAME);
       log.info({ name: BOT_NAME }, "telemost.name_filled");
     }
-  }
-
-  private async clickJoin(): Promise<void> {
-    const btn = await this.waitForFirst(SELECTORS.joinButton, LOBBY_TIMEOUT_MS);
-    if (!btn) throw new Error("Telemost: join button not found within timeout");
-    await btn.click();
-    log.info("telemost.join_clicked");
-  }
-
-  private async waitUntilInCall(): Promise<void> {
-    // Function form uses Runtime.callFunctionOn — not eval — safe under Telemost's CSP.
-    await this.page!.waitForFunction(
-      () => !document.querySelector('[data-testid="enter-conference-button"]'),
-      undefined,
-      { timeout: JOIN_TIMEOUT_MS, polling: 500 },
-    );
-    const found = await this.waitForFirst(SELECTORS.inCallIndicator, 10_000);
-    if (!found) throw new Error("Telemost: in-call indicator not found after lobby disappeared");
   }
 
   // Mute the microphone in the lobby before clicking Join.

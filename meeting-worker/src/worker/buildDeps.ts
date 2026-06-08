@@ -1,12 +1,10 @@
 // Wires concrete implementations for a worker process.
-// On Linux:       FfmpegAudioCapture reads from PulseAudio sink (prod path).
-// On Windows/Mac: WebRtcCapture intercepts RTCPeerConnection tracks in the
-//                 browser and delivers labeled PCM per participant.
+// WebRtcCapture intercepts RTCPeerConnection tracks in the browser and
+// delivers labeled PCM per participant — works in headless mode on all OS.
 
 import { CallContext, WorkerEnv } from "../types";
 import { WorkerDeps } from "./deps";
 import { TelemostClient } from "./meeting/telemostClient";
-import { FfmpegAudioCapture } from "./audio/ffmpegCapture";
 import { WebRtcCapture } from "./audio/webRtcCapture";
 import { SpeechKitTranscriber } from "./transcriber/speechKitTranscriber";
 import { log } from "../util/log";
@@ -24,23 +22,13 @@ export async function buildDeps(ctx: CallContext): Promise<WorkerDeps> {
   const env = deriveEnv(ctx);
   log.info({ callId: ctx.callId, env, platform: process.platform }, "worker.buildDeps");
 
-  const isLinux = process.platform === "linux";
-
-  let audio: FfmpegAudioCapture | WebRtcCapture;
-  let pageHook: ((page: import("playwright").Page) => Promise<void>) | undefined;
-
-  if (isLinux) {
-    audio = new FfmpegAudioCapture(env);
-  } else {
-    const rtc = new WebRtcCapture();
-    pageHook = rtc.asPageHook();
-    audio = rtc;
-  }
+  const rtc = new WebRtcCapture();
+  const pageHook = rtc.asPageHook();
 
   return {
     env,
     meeting: new TelemostClient(env, pageHook),
-    audio,
+    audio: rtc,
     transcriber: new SpeechKitTranscriber(),
   };
 }

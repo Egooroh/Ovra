@@ -33,6 +33,11 @@ const recentMessages = new Map<number, string>();
 interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: number; }
 const pendingTasks = new Map<string, PendingTask>();
 
+// Куда слать подтверждения задач: 'pm' (личка ПМа) или 'group' (группа-источник).
+const confirmDefault: 'pm' | 'group' =
+    (process.env.CONFIRM_TARGET === 'pm' ? 'pm' : 'group');
+const confirmTarget = new Map<string, 'pm' | 'group'>(); // tenant_id → override
+
 // Сессии онбординга (по user id):
 const awaitingKey = new Map<number, string>();                              // юзер → tenant: ждём API-ключ от админа
 const linkSessions = new Map<number, { tenant: string; members: YougileMember[] }>(); // юзер → выбор себя из YouGile
@@ -196,16 +201,19 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `_Создать карточку в YouGile?_`;
 
-        if (!activePmChatId) {
+        const target = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
+        const targetChatId = target === 'group' ? chatId : activePmChatId;
+
+        if (!targetChatId) {
             console.error("❌ ID ПМа не установлен! Некуда отправлять задачу.");
             if (ctx.chat && ctx.chat.type !== 'private') {
-                await ctx.reply("❌ Задача найдена, но я не знаю, кому её отправить на подтверждение. Кто-нибудь, напишите мне /start в личные сообщения!");
+                await ctx.reply("❌ Задача найдена, но я не знаю, кому её отправить на подтверждение. Кто-нибудь, напишите мне /start в личные сообщения, или используйте /confirm group.");
             }
             return;
         }
 
         try {
-            await ctx.telegram.sendMessage(activePmChatId, messageText, {
+            await ctx.telegram.sendMessage(targetChatId, messageText, {
                 parse_mode: 'Markdown',
                 ...Markup.inlineKeyboard([
                     Markup.button.callback('✅ Одобрить', `approve_${taskId}`),
@@ -213,7 +221,7 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
                 ])
             });
         } catch (error) {
-            console.error("❌ Ошибка отправки в личку.", error);
+            console.error("❌ Ошибка отправки подтверждения.", error);
         }
     }
 }
@@ -427,11 +435,21 @@ bot.command('stats', async (ctx) => {
         backendStatus = `❌ Ошибка подключения`;
     }
 
+    let confirmStatus = '—';
+    if (ctx.chat.type !== 'private') {
+        const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+        if (ws) {
+            const t = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
+            confirmStatus = t === 'group' ? '👥 В группу' : '👤 В личку ПМа';
+        }
+    }
+
     const statsText = `📊 **Статус системы Ovra PM-Bot**\n\n` +
                       `🌐 **Прокси:** ${proxyStatus}\n` +
                       `⚙️ **Go-Бэкенд:** ${backendStatus}\n` +
                       `🧠 **AI (OpenRouter):** ${aiStatus}\n` +
-                      `👤 **Личка ПМа:** ${pmStatus}\n\n` +
+                      `👤 **Личка ПМа:** ${pmStatus}\n` +
+                      `📬 **Подтверждения:** ${confirmStatus}\n\n` +
                       `👥 **Привязано юзеров:** ${Object.keys(userMapping).length}\n` +
                       `📦 **Сообщений в кэше:** ${recentMessages.size}\n` +
                       `⏳ **Задач в ожидании:** ${pendingTasks.size}`;
@@ -640,6 +658,34 @@ bot.action(/^reject_(.+)$/, async (ctx) => {
     await ctx.editMessageText('🗑️ Задача отклонена.');
 });
 
+bot.command('confirm', async (ctx) => {
+    const arg = ctx.message.text.split(' ').slice(1).join(' ').trim().toLowerCase();
+
+    if (ctx.chat.type !== 'private') {
+        const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+        if (!ws) return ctx.reply('❌ Чат не привязан к доске.');
+
+        if (arg === 'group') {
+            confirmTarget.set(ws.tenant_id, 'group');
+            return ctx.reply('✅ Задачи на подтверждение будут приходить *в эту группу*.', { parse_mode: 'Markdown' });
+        } else if (arg === 'pm') {
+            confirmTarget.set(ws.tenant_id, 'pm');
+            return ctx.reply('✅ Задачи на подтверждение будут приходить *в личку ПМа*.', { parse_mode: 'Markdown' });
+        } else {
+            const current = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
+            return ctx.reply(
+                `📬 Куда приходят подтверждения: *${current === 'group' ? 'в эту группу' : 'в личку ПМа'}*\n\n` +
+                `Изменить:\n` +
+                `/confirm group — приходить сюда в группу\n` +
+                `/confirm pm — приходить в личку ПМа`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+    }
+
+    return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
+});
+
 bot.command('help', async (ctx) => {
     await ctx.reply(
         `🤖 *Ovra PM-bot*\n` +
@@ -651,6 +697,8 @@ bot.command('help', async (ctx) => {
         `→ я пришлю карточку на подтверждение, жми *✅ Одобрить*.\n\n` +
         `*Команды:*\n` +
         `/start — назначить эту личку для подтверждений (ПМ)\n` +
+        `/confirm group — подтверждения в группу\n` +
+        `/confirm pm — подтверждения в личку ПМа\n` +
         `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
         `/stats — статус системы\n` +
         `/help — эта справка`,

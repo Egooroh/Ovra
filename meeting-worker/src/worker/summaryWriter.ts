@@ -42,9 +42,14 @@ export async function writeSummary(
   callId: string,
   organizationId: string | null,
   title: string | null,
-  startedAt: Date,
-  endedAt: Date,
+  startedAt: Date | string,
+  endedAt: Date | string,
 ): Promise<void> {
+  // fork() serializes via JSON so Date becomes string — normalise here.
+  const startDate = startedAt instanceof Date ? startedAt : new Date(startedAt);
+  const endDate = endedAt instanceof Date ? endedAt : new Date(endedAt);
+  startedAt = startDate;
+  endedAt = endDate;
   const transcript = await prisma.transcript.findUnique({
     where: { callId },
     select: { fullText: true },

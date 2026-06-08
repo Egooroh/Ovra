@@ -7,6 +7,7 @@ import { bot, handleMeetingDone, type MeetingDonePayload } from "./bot.js";
 // перечисляем, иначе перестанут приходить команды/текст и нажатия кнопок.
 bot.telegram.setMyCommands([
     { command: "start", description: "Назначить эту личку для подтверждений (ПМ)" },
+    { command: "confirm", description: "Куда слать подтверждения: group или pm" },
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
     { command: "stats", description: "Статус системы" },
     { command: "help", description: "Как пользоваться ботом" },

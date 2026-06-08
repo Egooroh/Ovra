@@ -34,6 +34,9 @@ services:
       # Таймзона для дедлайнов со временем без TZ (напр. «к 18:00»).
       DEADLINE_TZ: "${DEADLINE_TZ:-Europe/Moscow}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      # Интеграция с meeting-worker и ботом
+      MEETING_WORKER_URL: "http://meeting-worker:3001"
+      BOT_INTERNAL_URL: "http://bot:3000"
     ports:
       - "8080:8080"
     volumes:
@@ -44,11 +47,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - ./meeting-worker/.env
     environment:
       # Та же БД, но СВОЯ схема `meeting` — чтобы Prisma-миграции воркера не
       # конфликтовали с таблицами Go-бэкенда в схеме public (ошибка P3005).
       DATABASE_URL: "postgresql://ovra:ovra@postgres:5432/ovra?schema=meeting"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-qwen/qwen3.5-35b-a3b}"
       ORCH_POLL_MS: "${ORCH_POLL_MS:-15000}"
       ORCH_JOIN_LEAD_MS: "${ORCH_JOIN_LEAD_MS:-60000}"
       ORCH_MAX_CALLS: "${ORCH_MAX_CALLS:-3}"
@@ -70,6 +76,7 @@ services:
       YANDEX_STT_ENDPOINT: "${YANDEX_STT_ENDPOINT:-stt.api.cloud.yandex.net:443}"
       YANDEX_STT_LANG: "${YANDEX_STT_LANG:-ru-RU}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      BACKEND_URL: "http://app:8080"
     volumes:
       # JSON-файлы саммари встреч — общая папка чтобы Go-разработчик мог читать
       - meeting_output:/app/output

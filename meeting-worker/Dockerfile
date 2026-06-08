@@ -1,29 +1,44 @@
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-FROM node:20-alpine AS build
+FROM node:20-slim AS build
 WORKDIR /app
-# Prisma engine needs libssl (OpenSSL 3.x) on Alpine/musl.
-RUN apk add --no-cache openssl
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY prisma ./prisma
+COPY proto ./proto
 COPY src ./src
 RUN npm run build
 RUN npx prisma generate
 
-FROM node:20-alpine
+FROM node:20-slim
 WORKDIR /app
-# Runtime also runs `prisma migrate deploy`, which needs libssl.
-RUN apk add --no-cache openssl
+
+# System deps: openssl (Prisma), Xvfb (virtual display), PulseAudio (audio), Playwright deps
+RUN apt-get update && apt-get install -y \
+    openssl \
+    xvfb \
+    pulseaudio \
+    pulseaudio-utils \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /app/proto ./proto
 COPY package.json ./
 COPY prisma ./prisma
+COPY scripts/docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Применяем Prisma-миграции (таблицы Call/Transcript), затем запускаем оркестратор
-ENTRYPOINT ["sh", "-c", "npx prisma migrate deploy && node dist/orchestrator/index.js"]
+# Install Playwright's Chromium with all system dependencies
+RUN npx playwright install --with-deps chromium
+
+ENV DISPLAY=:99
+
+ENTRYPOINT ["/entrypoint.sh"]
