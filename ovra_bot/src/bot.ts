@@ -23,7 +23,9 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
 let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || undefined;
 
 const recentMessages = new Map<number, string>();
-const pendingTasks = new Map<string, ParsedTask>();
+// Храним задачу вместе с чатом-источником, чтобы после одобрения уведомить группу.
+interface PendingTask { task: ParsedTask; originChatId?: number; }
+const pendingTasks = new Map<string, PendingTask>();
 
 // --- СИСТЕМА ПРИВЯЗКИ ПОЛЬЗОВАТЕЛЕЙ (Маппинг) ---
 const MAPPING_FILE = path.resolve(process.cwd(), 'users.json');
@@ -109,14 +111,17 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
     
     if (parsed && parsed.isTask) {
         const taskId = crypto.randomBytes(8).toString('hex');
-        pendingTasks.set(taskId, parsed);
+        pendingTasks.set(taskId, { task: parsed, originChatId: ctx.chat?.id });
         cleanUpCache();
 
-        const messageText = `🤖 **Найдена задача из чата**\n\n` +
-                            `📌 Название: ${parsed.title || 'Без названия'}\n` +
-                            `👤 Исполнитель: ${parsed.assignee || 'Не указан'}\n` +
-                            `⏳ Дедлайн: ${parsed.deadline || 'Не указан'}\n` +
-                            `📝 Описание: ${parsed.description || 'Нет'}`;
+        const messageText = `🆕 *Новая задача на подтверждение*\n` +
+                            `━━━━━━━━━━━━━━━━━━\n` +
+                            `📌 *${parsed.title || 'Без названия'}*\n\n` +
+                            `👤 Исполнитель: ${parsed.assignee || '—'}\n` +
+                            `⏳ Дедлайн: ${parsed.deadline || '—'}\n` +
+                            `📝 ${parsed.description || 'без описания'}\n` +
+                            `━━━━━━━━━━━━━━━━━━\n` +
+                            `_Создать карточку в YouGile?_`;
 
         if (!activePmChatId) {
             console.error("❌ ID ПМа не установлен! Некуда отправлять задачу.");
@@ -179,7 +184,13 @@ bot.command('stats', async (ctx) => {
 bot.on("text", async (ctx) => {
     const message = ctx.message;
     recentMessages.set(message.message_id, message.text);
-    // ИИ отключен для обычных сообщений в целях экономии токенов
+
+    // В группе: если сообщение похоже на задачу — разбираем сразу. Эвристика
+    // (длина, нет "?", слово-триггер) отсекает болтовню, поэтому LLM зовётся
+    // редко и токены экономятся. Реакции ✍️/🔥 остаются ручным триггером.
+    if (ctx.chat.type !== "private" && isPotentialTask(message.text)) {
+        await processTaskAndConfirm(ctx, message.text);
+    }
 });
 
 bot.on("message_reaction", async (ctx) => {
@@ -198,50 +209,121 @@ bot.on("message_reaction", async (ctx) => {
     }
 });
 
-bot.action(/^approve_(.+)$/, async (ctx) => {
-    const taskId = ctx.match[1]!; 
-    const taskData = pendingTasks.get(taskId);
+// Создаёт задачу через бэкенд. force=false: при найденных дублях показывает
+// подтверждение «всё равно добавить?». force=true: создаёт в обход дедупа.
+async function submitTask(ctx: Context, taskId: string, pending: PendingTask, force: boolean) {
+    const taskData = pending.task;
 
-    if (!taskData) {
-        return ctx.answerCbQuery('Задача устарела или не найдена.');
+    // @username → имя из YouGile, если привязан через /bind.
+    let assignee = taskData.assignee || "";
+    if (assignee.startsWith('@')) {
+        const mapped = userMapping[assignee.toLowerCase()];
+        if (mapped) assignee = mapped;
     }
 
-    try {
-        await ctx.answerCbQuery('Отправляю в Ovra Backend...');
+    const title = taskData.title || "Новая задача из Telegram";
+    const description = taskData.description || "";
+    const deadline = taskData.deadline || "";
 
-        // Ищем тег в нашей базе. Если находим — подменяем на Имя из YouGile.
-        let assignee = taskData.assignee || "";
-        if (assignee.startsWith('@')) {
-            const mappedName = userMapping[assignee.toLowerCase()];
-            if (mappedName) {
-                assignee = mappedName;
-            }
-        }
+    const result = await sendTaskToOvraBackend(title, assignee, description, deadline, force);
 
-        const title = taskData.title || "Новая задача из Telegram";
-        const description = taskData.description || "";
-
-        const result = await sendTaskToOvraBackend(title, assignee, description);
-        
+    // Найдены похожие задачи — спрашиваем хоста, добавлять ли всё равно.
+    if (result.isDuplicate && !force) {
+        const onBoard = (result.duplicates || []).map(d => `• ${d.title}`).join('\n') || '—';
         await ctx.editMessageText(
-            `✅ **Задача создана!**\n` +
-            `Название: ${title}\n` +
-            `Исполнитель: ${assignee || 'Не указан'}\n` +
-            `ID в YouGile: \`${result.yougile_task_id || 'Неизвестно'}\``, 
-            { parse_mode: 'Markdown' }
+            `⚠️ *Похоже, такая задача уже есть*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `🆕 Новая задача:\n*${title}*\n\n` +
+            `📋 Уже на доске:\n${onBoard}\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Вы желаете добавить?`,
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    Markup.button.callback('✅ Да, добавить', `force_${taskId}`),
+                    Markup.button.callback('❌ Нет', `reject_${taskId}`)
+                ])
+            }
         );
-        
-        pendingTasks.delete(taskId);
+        return; // pending НЕ удаляем — нужен для кнопки «Да, добавить»
+    }
+
+    // Успех.
+    await ctx.editMessageText(
+        `✅ *Задача создана в YouGile*\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `📌 *${title}*\n` +
+        `👤 ${assignee || '—'}\n` +
+        `🔗 ID: \`${result.yougile_task_id || 'неизвестно'}\``,
+        { parse_mode: 'Markdown' }
+    );
+
+    // Уведомляем исходный чат (группу), что задача поставлена.
+    if (pending.originChatId && pending.originChatId !== ctx.chat?.id) {
+        try {
+            await ctx.telegram.sendMessage(
+                pending.originChatId,
+                `✅ *Задача поставлена в YouGile*\n📌 ${title}` +
+                (assignee ? `\n👤 ${assignee}` : ''),
+                { parse_mode: 'Markdown' }
+            );
+        } catch (e) {
+            console.error('Не удалось отправить уведомление в чат-источник:', e);
+        }
+    }
+
+    pendingTasks.delete(taskId);
+}
+
+bot.action(/^approve_(.+)$/, async (ctx) => {
+    const taskId = ctx.match[1]!;
+    const pending = pendingTasks.get(taskId);
+    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    try {
+        await ctx.answerCbQuery('Проверяю…');
+        await submitTask(ctx, taskId, pending, false);
     } catch (error) {
         console.error(error);
-        await ctx.editMessageText('❌ Ошибка при передаче задачи в Ovra Backend. Проверь логи.');
+        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.');
+    }
+});
+
+// «Да, добавить» — создать несмотря на найденные дубли.
+bot.action(/^force_(.+)$/, async (ctx) => {
+    const taskId = ctx.match[1]!;
+    const pending = pendingTasks.get(taskId);
+    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    try {
+        await ctx.answerCbQuery('Добавляю…');
+        await submitTask(ctx, taskId, pending, true);
+    } catch (error) {
+        console.error(error);
+        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.');
     }
 });
 
 bot.action(/^reject_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     pendingTasks.delete(taskId);
-    await ctx.editMessageText('❌ Задача отменена.');
+    await ctx.editMessageText('🗑️ Задача отклонена.');
+});
+
+bot.command('help', async (ctx) => {
+    await ctx.reply(
+        `🤖 *Ovra PM-bot*\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `Я слежу за чатом и превращаю поручения в карточки YouGile.\n\n` +
+        `*Как создать задачу:*\n` +
+        `• просто напиши поручение в чат (напр. «нужно сделать отчёт к пятнице»)\n` +
+        `• или поставь реакцию ✍️/🔥 на любое сообщение\n` +
+        `→ я пришлю карточку на подтверждение, жми *✅ Одобрить*.\n\n` +
+        `*Команды:*\n` +
+        `/start — назначить эту личку для подтверждений (ПМ)\n` +
+        `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
+        `/stats — статус системы\n` +
+        `/help — эта справка`,
+        { parse_mode: 'Markdown' }
+    );
 });
 
 export { bot };

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the timezone database (alpine image has none)
 
 	"ovra/internal/config"
 	"ovra/internal/integrations/llm"

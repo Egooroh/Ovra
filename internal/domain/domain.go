@@ -40,6 +40,9 @@ type Workspace struct {
 	YougileProjectID string  `yaml:"yougile_project_id"`
 	Columns          Columns `yaml:"columns"`
 	HostTgID         string  `yaml:"host_tg_id"`
+	// Timezone (IANA, e.g. "Europe/Moscow") used to interpret deadline times
+	// that carry no timezone. Empty → global DEADLINE_TZ fallback.
+	Timezone string `yaml:"timezone"`
 }
 
 // User is a workspace member mapped to their YouGile account.

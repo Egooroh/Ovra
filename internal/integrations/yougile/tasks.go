@@ -72,7 +72,8 @@ func (c *Client) CompleteTask(ctx context.Context, token, id string) error {
 	return c.UpdateTask(ctx, token, id, UpdateTaskRequest{Completed: &done})
 }
 
-// DeadlineFromTime builds a Deadline (with time) from t.
-func DeadlineFromTime(t time.Time) *Deadline {
-	return &Deadline{Deadline: t.UnixMilli(), WithTime: true}
+// DeadlineFromTime builds a Deadline from t. withTime controls whether YouGile
+// shows the time component (false → date only).
+func DeadlineFromTime(t time.Time, withTime bool) *Deadline {
+	return &Deadline{Deadline: t.UnixMilli(), WithTime: withTime}
 }

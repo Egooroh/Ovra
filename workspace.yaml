@@ -11,3 +11,5 @@ workspaces:
       review: "0f194a72-b8e8-4114-a834-18c6eb6f3dd0"
       done: "590fdb88-d130-419b-bd5b-0aa0e5299801"
     host_tg_id: "123456789"
+    # IANA-таймзона для дедлайнов со временем без TZ (напр. «к 18:00»).
+    timezone: "Europe/Moscow"

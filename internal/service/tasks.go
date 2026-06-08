@@ -89,9 +89,10 @@ type TaskInput struct {
 	Title       string
 	Description string
 	Assignee    string // human name; mapped to a YouGile user id
-	Deadline    *time.Time
-	Source      string // chat | meeting
-	Force       bool   // skip the duplicate check (host confirmed)
+	Deadline        *time.Time
+	DeadlineHasTime bool   // true → YouGile shows the time, not just the date
+	Source          string // chat | meeting
+	Force           bool   // skip the duplicate check (host confirmed)
 }
 
 // FindDuplicates finds active tasks that duplicate (title, description).
@@ -182,7 +183,7 @@ func (s *Tasks) CreateAndPublish(ctx context.Context, in TaskInput) (domain.Task
 		Assigned:    assigned,
 	}
 	if in.Deadline != nil {
-		req.Deadline = yougile.DeadlineFromTime(*in.Deadline)
+		req.Deadline = yougile.DeadlineFromTime(*in.Deadline, in.DeadlineHasTime)
 	}
 
 	cardID, err := s.yg.CreateTask(ctx, token, req)

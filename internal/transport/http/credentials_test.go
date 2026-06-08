@@ -43,6 +43,14 @@ func (f *fakeRepo) GetWorkspace(_ context.Context, id string) (domain.Workspace,
 	}
 	return ws, nil
 }
+func (f *fakeRepo) GetWorkspaceByChat(_ context.Context, chatID string) (domain.Workspace, error) {
+	for _, ws := range f.workspaces {
+		if ws.ChatID == chatID {
+			return ws, nil
+		}
+	}
+	return domain.Workspace{}, storage.ErrNotFound
+}
 
 func (f *fakeRepo) SetYougileCredentials(_ context.Context, _ string, login string, enc []byte) error {
 	f.setLogin, f.setEnc = login, enc

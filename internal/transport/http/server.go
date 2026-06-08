@@ -51,6 +51,9 @@ func NewServer(cfg *config.Config, repo storage.Repository, cipher *secret.Ciphe
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("POST /v1/workspaces", s.handleCreateWorkspace)
+	mux.HandleFunc("GET /v1/chats/{chat_id}/workspace", s.handleWorkspaceByChat)
+	mux.HandleFunc("GET /v1/workspaces/{tenant}/yougile-users", s.handleYouGileUsers)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/credentials", s.handleSetCredentials)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/board/resolve", s.handleResolveBoard)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/users", s.handleRegisterUser)

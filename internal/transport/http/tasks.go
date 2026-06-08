@@ -2,7 +2,9 @@ package http
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"ovra/internal/domain"
@@ -62,12 +64,20 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Force:       req.Force,
 	}
 	if req.Deadline != "" {
-		dl, err := time.Parse(time.RFC3339, req.Deadline)
+		// Interpret datetimes without a timezone in the workspace's timezone.
+		loc := workspaceLocation("")
+		if s.repo != nil {
+			if ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID); err == nil {
+				loc = workspaceLocation(ws.Timezone)
+			}
+		}
+		dl, hasTime, err := parseDeadline(req.Deadline, loc)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "deadline must be RFC3339, e.g. 2026-06-10T18:00:00Z")
+			writeError(w, http.StatusBadRequest, "deadline must be a date (2026-06-10), datetime (2026-06-10T18:00) or RFC3339")
 			return
 		}
 		in.Deadline = &dl
+		in.DeadlineHasTime = hasTime
 	}
 
 	task, err := s.tasks.CreateAndPublish(r.Context(), in)
@@ -177,6 +187,39 @@ func (s *Server) writeCreateTaskError(w http.ResponseWriter, task domain.Task, e
 		s.log.Error("create task", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+// workspaceLocation resolves a workspace timezone (IANA name), falling back to
+// the global DEADLINE_TZ, then UTC.
+func workspaceLocation(tz string) *time.Location {
+	if tz == "" {
+		tz = os.Getenv("DEADLINE_TZ")
+	}
+	if tz == "" {
+		tz = "Europe/Moscow"
+	}
+	if loc, err := time.LoadLocation(tz); err == nil {
+		return loc
+	}
+	return time.UTC
+}
+
+// parseDeadline accepts a date (2006-01-02), a datetime without timezone
+// (interpreted in loc) or a full RFC3339 timestamp. hasTime is false for a
+// date-only value, so YouGile shows just the date.
+func parseDeadline(s string, loc *time.Location) (t time.Time, hasTime bool, err error) {
+	if t, err = time.Parse(time.RFC3339, s); err == nil {
+		return t, true, nil
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if t, err = time.ParseInLocation(layout, s, loc); err == nil {
+			return t, true, nil
+		}
+	}
+	if t, err = time.Parse("2006-01-02", s); err == nil {
+		return t, false, nil // date only — no time component
+	}
+	return time.Time{}, false, fmt.Errorf("unrecognized deadline %q", s)
 }
 
 // toTaskResponses maps a slice of tasks to their JSON view.

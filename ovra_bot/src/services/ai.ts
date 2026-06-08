@@ -23,9 +23,21 @@ export interface ParsedTask {
     title?: string;
 }
 
-const SYSTEM_PROMPT = `
+// Промпт строится при каждом вызове, чтобы подставить СЕГОДНЯШНЮЮ дату —
+// тогда модель может вычислить абсолютный срок из «завтра», «до 10 июня» и т.п.
+function buildSystemPrompt(): string {
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    return `
 Это сообщение из рабочего чата. Определи: это реальная задача (task) или нет (none)?
-Если task — извлеки: title (краткое название), assignee (исполнитель), deadline (срок), description (описание).
+Если task — извлеки: title (краткое название), assignee (исполнитель),
+deadline (срок), description (описание).
+
+Сегодня ${today}. Поле deadline верни как АБСОЛЮТНУЮ дату, вычислив её из текста
+(«завтра», «до 10 июня», «к пятнице»):
+- если время НЕ названо — формат YYYY-MM-DD (напр. "2026-06-10");
+- если время названо («к 18:00», «в 15:30») — формат YYYY-MM-DDTHH:mm (напр. "2026-06-10T18:00").
+Если срок не указан — верни пустую строку "".
+
 Если это не задача, верни {"isTask": false}.
 Отвечай строго в формате JSON. Никаких пояснений, только JSON.
 
@@ -34,10 +46,11 @@ const SYSTEM_PROMPT = `
   "isTask": true,
   "title": "Сделать кнопку",
   "assignee": "@ivan",
-  "deadline": "завтра",
+  "deadline": "2026-06-10",
   "description": "Нужно добавить красную кнопку на главную"
 }
 `;
+}
 
 export async function parseMessageWithAI(message: string): Promise<ParsedTask | null> {
     try {
@@ -46,7 +59,7 @@ export async function parseMessageWithAI(message: string): Promise<ParsedTask | 
         const completion = await openai.chat.completions.create({
             model: process.env.AI_MODEL || "mistralai/mistral-7b-instruct:free",
             messages: [
-                { role: "system", content: SYSTEM_PROMPT },
+                { role: "system", content: buildSystemPrompt() },
                 { role: "user", content: message }
             ]
         });

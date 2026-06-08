@@ -31,6 +31,8 @@ services:
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
       OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
       DEDUP_SIMILARITY: "${DEDUP_SIMILARITY:-0.4}"
+      # Таймзона для дедлайнов со временем без TZ (напр. «к 18:00»).
+      DEADLINE_TZ: "${DEADLINE_TZ:-Europe/Moscow}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       - "8080:8080"

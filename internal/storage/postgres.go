@@ -47,8 +47,8 @@ func (p *Postgres) UpsertWorkspace(ctx context.Context, ws domain.Workspace) err
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO workspaces
 			(id, chat_id, name, yougile_project_id,
-			 col_todo, col_in_progress, col_review, col_done, host_tg_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			 col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE(NULLIF($10,''),'Europe/Moscow'))
 		ON CONFLICT (id) DO UPDATE SET
 			chat_id            = EXCLUDED.chat_id,
 			name               = EXCLUDED.name,
@@ -57,10 +57,11 @@ func (p *Postgres) UpsertWorkspace(ctx context.Context, ws domain.Workspace) err
 			col_in_progress    = EXCLUDED.col_in_progress,
 			col_review         = EXCLUDED.col_review,
 			col_done           = EXCLUDED.col_done,
-			host_tg_id         = EXCLUDED.host_tg_id`,
+			host_tg_id         = EXCLUDED.host_tg_id,
+			timezone           = EXCLUDED.timezone`,
 		ws.ID, ws.ChatID, ws.Name, ws.YougileProjectID,
 		ws.Columns.Todo, ws.Columns.InProgress, ws.Columns.Review, ws.Columns.Done,
-		ws.HostTgID)
+		ws.HostTgID, ws.Timezone)
 	if err != nil {
 		return fmt.Errorf("upsert workspace: %w", err)
 	}
@@ -71,16 +72,35 @@ func (p *Postgres) GetWorkspace(ctx context.Context, id string) (domain.Workspac
 	var ws domain.Workspace
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
-		       col_todo, col_in_progress, col_review, col_done, host_tg_id
+		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone
 		FROM workspaces WHERE id = $1`, id).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID)
+			&ws.HostTgID, &ws.Timezone)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("get workspace: %w", err)
+	}
+	return ws, nil
+}
+
+// GetWorkspaceByChat resolves a workspace by its Telegram chat id.
+func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domain.Workspace, error) {
+	var ws domain.Workspace
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, chat_id, name, yougile_project_id,
+		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone
+		FROM workspaces WHERE chat_id = $1 LIMIT 1`, chatID).
+		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
+			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
+			&ws.HostTgID, &ws.Timezone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Workspace{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("get workspace by chat: %w", err)
 	}
 	return ws, nil
 }
