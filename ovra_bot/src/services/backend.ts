@@ -154,6 +154,69 @@ export async function listYougileProjects(tenantId: string): Promise<YougileProj
     return (data.projects || []) as YougileProject[];
 }
 
+// Запланировать созвон по Telemost-ссылке из чата.
+export async function scheduleCallInOvra(
+    tenantId: string,
+    joinUrl: string,
+    title?: string,
+): Promise<{ id: string; duplicate?: boolean }> {
+    const url = `${BACKEND_URL}/v1/workspaces/${tenantId}/calls`;
+    const body: Record<string, string> = { join_url: joinUrl };
+    if (title) body.title = title;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Schedule call HTTP ${response.status}: ${JSON.stringify(data)}`);
+    return data as { id: string; duplicate?: boolean };
+}
+
+// --- Calendar account management ---
+
+export interface CalendarAccount {
+    id: string;
+    organizationId: string;
+    provider: string;
+    label: string | null;
+    active: boolean;
+    calendarIds: string[];
+    createdAt: string;
+}
+
+export async function listCalendarAccounts(tenantId: string): Promise<CalendarAccount[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/calendar/accounts`);
+    if (!res.ok) throw new Error(`listCalendarAccounts HTTP ${res.status}`);
+    return await res.json() as CalendarAccount[];
+}
+
+export async function addCalendarAccount(
+    tenantId: string,
+    provider: 'google' | 'yandex',
+    credentials: object,
+    label?: string,
+    calendarIds?: string[],
+): Promise<CalendarAccount> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/calendar/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, credentials, label, calendarIds }),
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(`addCalendarAccount HTTP ${res.status}: ${JSON.stringify(err)}`);
+    }
+    return await res.json() as CalendarAccount;
+}
+
+export async function deleteCalendarAccount(tenantId: string, accountId: string): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/calendar/accounts/${accountId}`, {
+        method: 'DELETE',
+    });
+    if (!res.ok) throw new Error(`deleteCalendarAccount HTTP ${res.status}`);
+}
+
 // Привязать проект к воркспейсу и распознать колонки доски.
 export async function setWorkspaceProject(tenantId: string, projectId: string): Promise<void> {
     const p = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/project`, {

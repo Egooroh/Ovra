@@ -37,6 +37,10 @@ type Config struct {
 	// Authorization: Bearer <token> when POSTing to /v1/meetings/summary.
 	// Empty → auth is skipped (dev/testing only).
 	WorkerSecret string
+	// MeetingWorkerURL is the base URL of the TS meeting-worker management API,
+	// e.g. http://meeting-worker:3001. Used to forward Telemost links for scheduling.
+	// Empty → the /v1/workspaces/{tenant}/calls endpoint returns 503.
+	MeetingWorkerURL string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -57,8 +61,9 @@ func Load() (*Config, error) {
 		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
 		OpenRouterModel:   os.Getenv("OPENROUTER_MODEL"),
 		OpenRouterBaseURL: os.Getenv("OPENROUTER_BASE_URL"),
-		DedupThreshold:    envFloat("DEDUP_SIMILARITY", 0.4),
-		WorkerSecret:      os.Getenv("WORKER_SECRET"),
+		DedupThreshold:   envFloat("DEDUP_SIMILARITY", 0.4),
+		WorkerSecret:     os.Getenv("WORKER_SECRET"),
+		MeetingWorkerURL: os.Getenv("MEETING_WORKER_URL"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")

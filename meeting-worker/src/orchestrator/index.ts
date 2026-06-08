@@ -15,6 +15,7 @@ import { prisma, disconnect } from "../db/prisma";
 import { config } from "../util/config";
 import { log } from "../util/log";
 import { CallContext, ParentToWorker, WorkerToParent } from "../types";
+import { createApiServer } from "../api";
 
 // In dev (ts-node) __filename ends with .ts; in prod it ends with .js.
 const IS_DEV = __filename.endsWith(".ts");
@@ -39,6 +40,7 @@ export class Orchestrator {
   private processed = 0;
   private failed = 0;
   private statusTimer?: NodeJS.Timeout;
+  private apiServer = createApiServer();
 
   async run(): Promise<void> {
     log.info("orchestrator.start");
@@ -47,6 +49,9 @@ export class Orchestrator {
     this.healthTimer = setInterval(() => void this.checkHealth(), config.orchestrator.heartbeatTimeoutMs / 2);
     // Emit a status snapshot every minute so silence in the logs means trouble.
     this.statusTimer = setInterval(() => this.logStatus(), 60_000);
+    this.apiServer.listen(config.api.port, () => {
+      log.info({ port: config.api.port }, "api.started");
+    });
     await this.tick();
   }
 
@@ -205,6 +210,7 @@ export class Orchestrator {
     }
     await new Promise((r) => setTimeout(r, 3000));
     for (const slot of this.slots.values()) slot.child.kill("SIGKILL");
+    await new Promise<void>((r) => this.apiServer.close(() => r()));
     await disconnect();
     log.info("orchestrator.stopped");
   }

@@ -86,4 +86,9 @@ export const config = {
     /** Tenant (workspace) id this worker belongs to */
     tenantId: process.env.BACKEND_TENANT_ID ?? "",
   },
+
+  api: {
+    /** Port for the meeting-worker management HTTP API. */
+    port: num("API_PORT", 3001),
+  },
 } as const;
