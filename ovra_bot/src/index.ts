@@ -12,6 +12,11 @@ bot.telegram.setMyCommands([
     { command: "help", description: "Как пользоваться ботом" },
 ]).catch(() => { /* не критично */ });
 
+// Глобальный лог ошибок хендлеров — чтобы видеть, что падает на апдейтах.
+bot.catch((err, ctx) => {
+    console.error(`BOT ERROR on update [${ctx?.updateType}]:`, err);
+});
+
 bot.launch({
     allowedUpdates: ["message", "callback_query", "message_reaction", "my_chat_member"],
 }).then(() => {
