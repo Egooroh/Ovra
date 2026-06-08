@@ -297,17 +297,30 @@ bot.action(/^cal_add_g:(.+)$/, async (ctx) => {
     const userId = ctx.from!.id;
     calendarSessions.set(userId, { tenant, provider: 'google', step: 'json' });
     await ctx.answerCbQuery();
-    const me = await ctx.telegram.getMe();
-    await ctx.editMessageText(
-        '🔵 *Подключение Google Calendar*\n\n' +
-        'Пришлите JSON-файл *service account* (или вставьте содержимое текстом) ' +
-        'в личные сообщения боту.\n\n' +
-        '_Как получить: IAM → Service Accounts → Ключи → Добавить ключ → JSON._',
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
-        }
-    );
+    const isPrivate = ctx.chat?.type === 'private';
+    if (isPrivate) {
+        await ctx.editMessageText(
+            '🔵 *Подключение Google Calendar*\n\n' +
+            'Пришлите JSON-файл *service account* (или вставьте содержимое текстом).\n\n' +
+            '*Как получить:*\n' +
+            '1. console.cloud.google.com → IAM → Сервисные аккаунты → Создать\n' +
+            '2. Открыть аккаунт → Ключи → Добавить ключ → JSON\n' +
+            '3. Поделиться календарём с email аккаунта (права «Просмотр»)',
+            { parse_mode: 'Markdown' }
+        );
+    } else {
+        const me = await ctx.telegram.getMe();
+        await ctx.editMessageText(
+            '🔵 *Подключение Google Calendar*\n\n' +
+            'Пришлите JSON-файл *service account* (или вставьте содержимое текстом) ' +
+            'в личные сообщения боту.\n\n' +
+            '_Как получить: IAM → Service Accounts → Ключи → Добавить ключ → JSON._',
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
+            }
+        );
+    }
 });
 
 // Старт добавления Яндекс-аккаунта.
@@ -316,15 +329,26 @@ bot.action(/^cal_add_y:(.+)$/, async (ctx) => {
     const userId = ctx.from!.id;
     calendarSessions.set(userId, { tenant, provider: 'yandex', step: 'login' });
     await ctx.answerCbQuery();
-    const me = await ctx.telegram.getMe();
-    await ctx.editMessageText(
-        '🟡 *Подключение Яндекс Календаря*\n\n' +
-        'Откройте личку бота и введите *логин CalDAV* (обычно email @yandex.ru).',
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
-        }
-    );
+    const isPrivate = ctx.chat?.type === 'private';
+    if (isPrivate) {
+        await ctx.editMessageText(
+            '🟡 *Подключение Яндекс Календаря*\n\n' +
+            'Введите *логин CalDAV* (обычно email @yandex.ru).\n\n' +
+            '*Важно:* нужен пароль приложения, не обычный пароль от Яндекса.\n' +
+            'Получить: passport.yandex.ru → Безопасность → Пароли приложений → Создать',
+            { parse_mode: 'Markdown' }
+        );
+    } else {
+        const me = await ctx.telegram.getMe();
+        await ctx.editMessageText(
+            '🟡 *Подключение Яндекс Календаря*\n\n' +
+            'Откройте личку бота и введите *логин CalDAV* (обычно email @yandex.ru).',
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
+            }
+        );
+    }
 });
 
 // Удаление аккаунта. Формат: cal_del:<accountId>:<tenant>
@@ -653,8 +677,16 @@ bot.action(/^proj_(\d+)$/, async (ctx) => {
         await setWorkspaceProject(sess.tenant, proj.id);
         projectSessions.delete(userId);
         await ctx.editMessageText(
-            `✅ Доска подключена: *${proj.title}*\nКолонки распознаны.\n\nТеперь сотрудники могут нажать «Открыть бота» в группе и подвязаться к себе.`,
-            { parse_mode: 'Markdown' }
+            `✅ Доска подключена: *${proj.title}*\n\n` +
+            `Подключите календарь, чтобы бот автоматически присоединялся к Telemost-звонкам и присылал саммари встреч:`,
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback('🔵 Google Calendar', `cal_add_g:${sess.tenant}`)],
+                    [Markup.button.callback('🟡 Яндекс Календарь', `cal_add_y:${sess.tenant}`)],
+                    [Markup.button.callback('⏭️ Пропустить', `cal_skip:${sess.tenant}`)],
+                ]),
+            }
         );
     } catch (e) {
         console.error('set project:', e);
@@ -685,6 +717,16 @@ bot.action(/^link_(\d+)$/, async (ctx) => {
         console.error('link register:', e);
         await ctx.editMessageText('❌ Не удалось сохранить привязку. Попробуйте позже.');
     }
+});
+
+// Пропустить подключение календаря при онбординге.
+bot.action(/^cal_skip:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+        '✅ Готово! Сотрудники могут нажать «Открыть бота» в группе и подвязаться к себе.\n\n' +
+        '_Подключить календарь можно позже командой `/calendar` в групповом чате._',
+        { parse_mode: 'Markdown' }
+    );
 });
 
 export { bot };
