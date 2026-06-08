@@ -55,4 +55,10 @@ export const config = {
     /** How far back to look (catch already-started meetings). */
     lookbackMs: num("CALENDAR_LOOKBACK_MS", 2 * 60 * 60_000),
   },
+
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY ?? "",
+    model: process.env.OPENROUTER_MODEL ?? "qwen/qwen3.5-35b-a3b",
+    baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+  },
 } as const;

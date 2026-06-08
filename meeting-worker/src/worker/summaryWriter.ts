@@ -1,7 +1,7 @@
 // src/worker/summaryWriter.ts
 //
 // После завершения созвона читает транскрипт из Postgres,
-// просит Claude сделать краткое саммари + список задач,
+// просит LLM (OpenRouter) сделать краткое саммари + список задач,
 // и пишет JSON-файл в ./output/{date}_{callId}.json
 //
 // Это граница ответственности TS-воркера: дальше файл забирает Go-разработчик.
@@ -9,6 +9,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import { config } from "../util/config";
 import { log } from "../util/log";
 
 const OUTPUT_DIR = path.resolve(process.cwd(), "output");
@@ -52,8 +53,8 @@ export async function writeSummary(
     return;
   }
 
-  // 2. Зовём Claude
-  const { summary, tasks } = await callClaude(fullText, title ?? "");
+  // 2. Генерируем саммари через LLM
+  const { summary, tasks } = await callLlm(fullText, title ?? "");
 
   // 3. Формируем структуру файла
   const payload: MeetingSummaryFile = {
@@ -77,17 +78,17 @@ export async function writeSummary(
   log.info({ callId, filepath }, "summaryWriter: wrote meeting summary");
 }
 
-// ── Claude API ────────────────────────────────────────────────────────────────
+// ── OpenRouter API ────────────────────────────────────────────────────────────
 
-interface ClaudeResult {
+interface LlmResult {
   summary: string;
   tasks: MeetingTask[];
 }
 
-async function callClaude(transcript: string, meetingTitle: string): Promise<ClaudeResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+async function callLlm(transcript: string, meetingTitle: string): Promise<LlmResult> {
+  const { apiKey, model, baseUrl } = config.openrouter;
   if (!apiKey) {
-    log.warn("summaryWriter: ANTHROPIC_API_KEY not set, returning empty summary");
+    log.warn("summaryWriter: OPENROUTER_API_KEY not set, returning empty summary");
     return { summary: "", tasks: [] };
   }
 
@@ -107,33 +108,46 @@ async function callClaude(transcript: string, meetingTitle: string): Promise<Cla
 Транскрипция:
 ${transcript}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
+      model,
+      max_tokens: 4096,
       messages: [{ role: "user", content: prompt }],
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(60_000),
   });
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Claude API ${res.status}: ${body}`);
+    throw new Error(`OpenRouter API ${res.status}: ${body}`);
   }
 
-  const envelope = await res.json() as {
-    content: Array<{ type: string; text: string }>;
-  };
+  const rawBody = await res.text();
 
-  const text = envelope.content.find((b) => b.type === "text")?.text ?? "";
+  let envelope: { choices: Array<{ message: { content: string } }> };
+  try {
+    envelope = JSON.parse(rawBody);
+  } catch {
+    throw new Error(`OpenRouter: invalid JSON response: ${rawBody.slice(0, 500)}`);
+  }
+
+  const text = envelope.choices?.[0]?.message?.content ?? "";
+  if (!text) {
+    throw new Error(`OpenRouter: empty content in response: ${rawBody.slice(0, 500)}`);
+  }
+
   const clean = text.trim().replace(/^```json|^```|```$/gm, "").trim();
 
-  const parsed = JSON.parse(clean) as ClaudeResult;
+  let parsed: LlmResult;
+  try {
+    parsed = JSON.parse(clean) as LlmResult;
+  } catch {
+    throw new Error(`OpenRouter: model returned non-JSON: ${clean.slice(0, 500)}`);
+  }
   return parsed;
 }
