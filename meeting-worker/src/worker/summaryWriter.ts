@@ -4,6 +4,10 @@
 // просит LLM (OpenRouter) сделать краткое саммари + список задач,
 // и пишет JSON-файл в ./output/{date}_{callId}.json
 //
+// Для длинных созвонов (> CHUNK_CHARS) используется map-reduce:
+// транскрипт бьётся на куски, каждый суммаризируется отдельно,
+// потом финальный запрос объединяет всё в одно саммари и дедублицирует задачи.
+//
 // Это граница ответственности TS-воркера: дальше файл забирает Go-разработчик.
 
 import fs from "node:fs/promises";
@@ -13,6 +17,10 @@ import { config } from "../util/config";
 import { log } from "../util/log";
 
 const OUTPUT_DIR = path.resolve(process.cwd(), "output");
+
+// Транскрипты короче этого порога обрабатываются одним запросом.
+// ~60k символов ≈ 15k токенов — комфортно для одного прохода.
+const CHUNK_CHARS = 60_000;
 
 // ── типы выходного файла ──────────────────────────────────────────────────────
 
@@ -27,7 +35,7 @@ export interface MeetingSummaryFile {
   title: string;
   started_at: string;  // ISO-8601
   ended_at: string;    // ISO-8601
-  summary: string;     // краткий текст от Claude
+  summary: string;
   tasks: MeetingTask[];
   transcript: string;  // полный текст для Go-разработчика
 }
@@ -41,7 +49,6 @@ export async function writeSummary(
   startedAt: Date,
   endedAt: Date,
 ): Promise<void> {
-  // 1. Читаем транскрипт из Postgres
   const transcript = await prisma.transcript.findUnique({
     where: { callId },
     select: { fullText: true },
@@ -53,10 +60,12 @@ export async function writeSummary(
     return;
   }
 
-  // 2. Генерируем саммари через LLM
-  const { summary, tasks } = await callLlm(fullText, title ?? "");
+  log.info({ callId, chars: fullText.length }, "summaryWriter: starting");
 
-  // 3. Формируем структуру файла
+  const { summary, tasks } = fullText.length <= CHUNK_CHARS
+    ? await summarizeDirect(fullText, title ?? "")
+    : await summarizeChunked(fullText, title ?? "");
+
   const payload: MeetingSummaryFile = {
     call_id: callId,
     title: title ?? "",
@@ -67,10 +76,9 @@ export async function writeSummary(
     transcript: fullText,
   };
 
-  // 4. Пишем файл
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-  const date = startedAt.toISOString().slice(0, 10); // "2026-06-05"
+  const date = startedAt.toISOString().slice(0, 10);
   const filename = `${date}_${callId}.json`;
   const filepath = path.join(OUTPUT_DIR, filename);
 
@@ -78,22 +86,60 @@ export async function writeSummary(
   log.info({ callId, filepath }, "summaryWriter: wrote meeting summary");
 }
 
-// ── OpenRouter API ────────────────────────────────────────────────────────────
+// ── стратегии суммаризации ────────────────────────────────────────────────────
 
 interface LlmResult {
   summary: string;
   tasks: MeetingTask[];
 }
 
-async function callLlm(transcript: string, meetingTitle: string): Promise<LlmResult> {
-  const { apiKey, model, baseUrl } = config.openrouter;
-  if (!apiKey) {
-    log.warn("summaryWriter: OPENROUTER_API_KEY not set, returning empty summary");
-    return { summary: "", tasks: [] };
-  }
+// Короткий созвон — один запрос.
+async function summarizeDirect(transcript: string, title: string): Promise<LlmResult> {
+  return callLlm(buildMainPrompt(transcript, title));
+}
 
-  const prompt = `Ты — ассистент по управлению проектами.
-Ниже транскрипция встречи "${meetingTitle}".
+// Длинный созвон — map-reduce.
+async function summarizeChunked(transcript: string, title: string): Promise<LlmResult> {
+  const chunks = splitIntoChunks(transcript, CHUNK_CHARS);
+  log.info({ chunks: chunks.length, totalChars: transcript.length }, "summaryWriter: chunked mode");
+
+  // Map: суммаризируем каждый кусок параллельно
+  const partials = await Promise.all(
+    chunks.map((chunk, i) => {
+      log.info({ chunk: i + 1, of: chunks.length }, "summaryWriter: processing chunk");
+      return callLlm(buildChunkPrompt(chunk, i + 1, chunks.length, title));
+    }),
+  );
+
+  // Reduce: объединяем частичные результаты в финальное саммари
+  const combinedSummaries = partials.map((p, i) => `Часть ${i + 1}:\n${p.summary}`).join("\n\n");
+  const allTasks = partials.flatMap((p) => p.tasks);
+
+  return callLlm(buildReducePrompt(combinedSummaries, allTasks, title));
+}
+
+// Делим по границам слов, не разрывая их посередине.
+function splitIntoChunks(text: string, maxChars: number): string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = start + maxChars;
+    if (end < text.length) {
+      // Отступаем до ближайшего пробела чтобы не резать слово
+      const boundary = text.lastIndexOf(" ", end);
+      if (boundary > start) end = boundary;
+    }
+    chunks.push(text.slice(start, end).trim());
+    start = end + 1;
+  }
+  return chunks;
+}
+
+// ── промпты ───────────────────────────────────────────────────────────────────
+
+function buildMainPrompt(transcript: string, title: string): string {
+  return `Ты — ассистент по управлению проектами.
+Ниже транскрипция встречи "${title}".
 
 Верни ТОЛЬКО JSON-объект (без markdown-блоков, без объяснений):
 {
@@ -107,7 +153,80 @@ async function callLlm(transcript: string, meetingTitle: string): Promise<LlmRes
 
 Транскрипция:
 ${transcript}`;
+}
 
+function buildChunkPrompt(chunk: string, n: number, total: number, title: string): string {
+  return `Ты — ассистент по управлению проектами.
+Это часть ${n} из ${total} транскрипции встречи "${title}".
+
+Извлеки из этой части ключевые моменты и задачи.
+Верни ТОЛЬКО JSON-объект (без markdown-блоков, без объяснений):
+{
+  "summary": "2-3 предложения: что обсуждалось в этой части",
+  "tasks": [
+    { "title": "...", "assignee": "имя или пустая строка", "deadline": "ISO-8601 или пустая строка" }
+  ]
+}
+
+Если задач нет — "tasks": [].
+
+Транскрипция (часть ${n}/${total}):
+${chunk}`;
+}
+
+function buildReducePrompt(summaries: string, tasks: MeetingTask[], title: string): string {
+  return `Ты — ассистент по управлению проектами.
+Встреча "${title}" была разбита на части и суммаризирована. Ниже — саммари каждой части и список всех задач.
+
+Саммари частей:
+${summaries}
+
+Все задачи (могут быть дубликаты):
+${JSON.stringify(tasks, null, 2)}
+
+Верни ТОЛЬКО JSON-объект (без markdown-блоков, без объяснений):
+{
+  "summary": "3-5 предложений: единое саммари всей встречи и главные решения",
+  "tasks": [
+    { "title": "...", "assignee": "имя или пустая строка", "deadline": "ISO-8601 или пустая строка" }
+  ]
+}
+
+Дедублицируй задачи: если одна и та же задача встречается несколько раз — оставь одну.`;
+}
+
+// ── OpenRouter API ────────────────────────────────────────────────────────────
+
+const RETRY_DELAYS_MS = [1_000, 3_000, 9_000];
+
+async function callLlm(prompt: string): Promise<LlmResult> {
+  const { apiKey, model, baseUrl } = config.openrouter;
+  if (!apiKey) {
+    log.warn("summaryWriter: OPENROUTER_API_KEY not set, returning empty summary");
+    return { summary: "", tasks: [] };
+  }
+
+  let lastError: Error = new Error("no attempts made");
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      const delay = RETRY_DELAYS_MS[attempt - 1];
+      log.warn({ attempt, delay }, "summaryWriter: retrying LLM call");
+      await new Promise((r) => setTimeout(r, delay));
+    }
+
+    try {
+      return await callLlmOnce(prompt, baseUrl, apiKey, model);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      log.warn({ attempt: attempt + 1, err: lastError.message }, "summaryWriter: LLM attempt failed");
+    }
+  }
+
+  throw lastError;
+}
+
+async function callLlmOnce(prompt: string, baseUrl: string, apiKey: string, model: string): Promise<LlmResult> {
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
