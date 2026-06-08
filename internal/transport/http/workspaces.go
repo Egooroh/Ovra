@@ -66,6 +66,21 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, s.workspaceResp(r.Context(), got))
 }
 
+// handleGetWorkspace returns a workspace (+ onboarding state) by tenant id.
+func (s *Server) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
+	ws, err := s.repo.GetWorkspace(r.Context(), r.PathValue("tenant"))
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.workspaceResp(r.Context(), ws))
+}
+
 // handleWorkspaceByChat resolves the workspace bound to a Telegram chat.
 func (s *Server) handleWorkspaceByChat(w http.ResponseWriter, r *http.Request) {
 	ws, err := s.repo.GetWorkspaceByChat(r.Context(), r.PathValue("chat_id"))
@@ -104,6 +119,59 @@ func (s *Server) handleYouGileUsers(w http.ResponseWriter, r *http.Request) {
 		out[i] = map[string]string{"id": u.ID, "name": u.RealName, "email": u.Email}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+}
+
+// handleYouGileProjects lists the company's YouGile projects (for the admin to
+// pick which one this group maps to).
+func (s *Server) handleYouGileProjects(w http.ResponseWriter, r *http.Request) {
+	if s.cipher == nil || s.yg == nil {
+		writeError(w, http.StatusServiceUnavailable, "disabled: APP_SECRET not set")
+		return
+	}
+	token, ok := s.loadToken(r.Context(), r.PathValue("tenant"))
+	if !ok {
+		writeError(w, http.StatusConflict, "workspace is not connected to YouGile")
+		return
+	}
+	projects, err := s.yg.ListProjects(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
+		return
+	}
+	out := make([]map[string]string, len(projects))
+	for i, p := range projects {
+		out[i] = map[string]string{"id": p.ID, "title": p.Title}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": out})
+}
+
+// setProjectRequest binds a workspace to a YouGile project.
+type setProjectRequest struct {
+	ProjectID string `json:"project_id"`
+}
+
+// handleSetProject stores the chosen project on the workspace.
+func (s *Server) handleSetProject(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	var req setProjectRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+	if err := s.repo.SetWorkspaceProject(r.Context(), tenant, req.ProjectID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set project", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "set"})
 }
 
 // workspaceResp builds the DTO and fills the onboarding-state flags.

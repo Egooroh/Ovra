@@ -12,7 +12,7 @@ bot.telegram.setMyCommands([
 ]).catch(() => { /* не критично */ });
 
 bot.launch({
-    allowedUpdates: ["message", "callback_query", "message_reaction"],
+    allowedUpdates: ["message", "callback_query", "message_reaction", "my_chat_member"],
 }).then(() => {
     console.log("Ovra PM-bot успешно запущен!");
 }).catch((err: unknown) => {
