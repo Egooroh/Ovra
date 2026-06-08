@@ -93,6 +93,10 @@ class SpeakerSession {
     log.info({ speaker, endpoint: config.speechkit.endpoint }, "speechkit.session_opened");
   }
 
+  isAlive(): boolean {
+    return this.active;
+  }
+
   push(pcm: Buffer): void {
     if (!this.active) return;
     this.stream.write({ chunk: { data: pcm } });
@@ -167,6 +171,11 @@ export class SpeechKitTranscriber implements Transcriber {
     if (!this.running) return;
     const key = speaker ?? "__default__";
     let session = this.sessions.get(key);
+    if (session && !session.isAlive()) {
+      log.warn({ speaker }, "speechkit: session dead, reconnecting");
+      session.close().catch(() => {});
+      session = undefined;
+    }
     if (!session) {
       session = new SpeakerSession(speaker, (seg) => {
         for (const cb of this.callbacks) cb(seg);

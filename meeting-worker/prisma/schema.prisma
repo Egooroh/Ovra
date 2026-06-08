@@ -24,11 +24,42 @@ enum CallStatus {
   CANCELLED // meeting removed from calendar before join
 }
 
+/// A calendar connection owned by one organization (tenant).
+/// One organization may have several (e.g. one per director's calendar).
+/// The watcher polls every active account and tags created Calls with the
+/// owning organizationId. Credentials are stored encrypted (AES-256-GCM);
+/// the key lives only in the environment (CALENDAR_CRED_KEY), never here.
+model CalendarAccount {
+  id             String   @id @default(cuid())
+  /// Opaque tenant id — matches the Go backend's organization id and the
+  /// tenant_id sent with each meeting summary. Not an FK: the canonical
+  /// Organization entity lives in the Go control plane, not in this DB.
+  organizationId String
+  /// "google" | "yandex".
+  provider       String
+  /// Human label for ops/logs, e.g. "Иван Петров / director@acme.ru".
+  label          String?
+  /// AES-256-GCM ciphertext of a provider-specific JSON credentials blob.
+  credentials    String
+  /// Google: calendar IDs to watch. Yandex: discovered automatically (may be empty).
+  calendarIds    String[]
+  /// Soft on/off switch so an account can be paused without deleting creds.
+  active         Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, active])
+}
+
 /// One scheduled/known meeting the bot should attend.
 model Call {
   id        String   @id @default(cuid())
   /// Stable id from the calendar source (dedupe key for the watcher).
   sourceId  String   @unique
+  /// Owning tenant. Nullable for backward compatibility: pre-existing rows and
+  /// the single-tenant env path (falls back to BACKEND_TENANT_ID downstream).
+  organizationId String?
   /// Where the bot connects.
   joinUrl   String
   title     String?
@@ -56,6 +87,8 @@ model Call {
 
   @@index([status, startsAt])
   @@index([heartbeatAt])
+  /// Fast per-tenant slot counting for the fairness cap in the orchestrator.
+  @@index([organizationId, status])
 }
 
 /// Aggregated transcript for one call, assembled from streamed segments.

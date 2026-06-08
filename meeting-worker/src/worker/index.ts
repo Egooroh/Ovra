@@ -98,9 +98,9 @@ class Worker {
           },
         },
       });
-      // Append with a separating space only when there's already text, so the
-      // transcript has no leading space and no duplicated first segment.
-      await prisma.$executeRaw`UPDATE "Transcript" SET "fullText" = CASE WHEN "fullText" = '' THEN ${seg.text} ELSE "fullText" || ' ' || ${seg.text} END, "updatedAt" = now() WHERE "callId" = ${this.ctx.callId}`;
+      // Append as "Спикер: текст" on a new line so the LLM knows who said what.
+      const entry = seg.speaker ? `${seg.speaker}: ${seg.text}` : seg.text;
+      await prisma.$executeRaw`UPDATE "Transcript" SET "fullText" = CASE WHEN "fullText" = '' THEN ${entry} ELSE "fullText" || E'\n' || ${entry} END, "updatedAt" = now() WHERE "callId" = ${this.ctx.callId}`;
       send({
         type: "segment",
         callId: this.ctx.callId,
@@ -188,6 +188,7 @@ class Worker {
       await writeSummary(
         prisma,
         this.ctx.callId,
+        this.ctx.organizationId,
         this.ctx.title ?? null,
         this.ctx.startsAt,
         new Date(),

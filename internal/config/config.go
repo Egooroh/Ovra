@@ -33,6 +33,10 @@ type Config struct {
 	// DedupThreshold is the pg_trgm similarity (0..1) above which a new task is
 	// treated as a possible duplicate. <= 0 disables deduplication.
 	DedupThreshold float64
+	// WorkerSecret is the shared token the TS meeting-worker includes in
+	// Authorization: Bearer <token> when POSTing to /v1/meetings/summary.
+	// Empty → auth is skipped (dev/testing only).
+	WorkerSecret string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -54,6 +58,7 @@ func Load() (*Config, error) {
 		OpenRouterModel:   os.Getenv("OPENROUTER_MODEL"),
 		OpenRouterBaseURL: os.Getenv("OPENROUTER_BASE_URL"),
 		DedupThreshold:    envFloat("DEDUP_SIMILARITY", 0.4),
+		WorkerSecret:      os.Getenv("WORKER_SECRET"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")

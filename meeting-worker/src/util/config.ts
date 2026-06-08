@@ -25,6 +25,13 @@ export const config = {
     heartbeatTimeoutMs: num("ORCH_HEARTBEAT_TIMEOUT_MS", 45_000),
     /** Max relaunch attempts per call before giving up. */
     maxAttempts: num("ORCH_MAX_ATTEMPTS", 2),
+    /**
+     * Fairness cap: max concurrent workers a single tenant (organization) may
+     * hold at once. Prevents one company that fires 20 calls at 10:00 from
+     * monopolizing all maxConcurrentCalls slots while other tenants wait.
+     * Always <= maxConcurrentCalls (the global ceiling still applies).
+     */
+    maxCallsPerTenant: num("ORCH_MAX_CALLS_PER_TENANT", 2),
   },
 
   worker: {
@@ -54,5 +61,29 @@ export const config = {
     lookaheadMs: num("CALENDAR_LOOKAHEAD_MS", 2 * 60 * 60_000),
     /** How far back to look (catch already-started meetings). */
     lookbackMs: num("CALENDAR_LOOKBACK_MS", 2 * 60 * 60_000),
+    /**
+     * Key for encrypting per-tenant calendar credentials at rest in the
+     * CalendarAccount table. 32 bytes, hex (64 chars) or base64. Kept only in
+     * the environment — never in the DB. Required only when CalendarAccount
+     * rows are used (multi-tenant mode); the single-tenant env path ignores it.
+     */
+    credKey: process.env.CALENDAR_CRED_KEY ?? "",
+  },
+
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY ?? "",
+    model: process.env.OPENROUTER_MODEL ?? "qwen/qwen3.5-35b-a3b",
+    baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+    /** Max simultaneous LLM requests across all workers. Prevents 429s under load. */
+    concurrency: num("OPENROUTER_CONCURRENCY", 5),
+  },
+
+  backend: {
+    /** Go backend base URL, e.g. http://backend:8080 */
+    url: process.env.BACKEND_URL ?? "",
+    /** Shared secret sent as Authorization: Bearer <token> */
+    workerSecret: process.env.WORKER_SECRET ?? "",
+    /** Tenant (workspace) id this worker belongs to */
+    tenantId: process.env.BACKEND_TENANT_ID ?? "",
   },
 } as const;

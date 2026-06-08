@@ -29,6 +29,8 @@ export function canTransition(from: CallStatus, to: CallStatus): boolean {
 export interface CallContext {
   callId: string;
   sourceId: string;
+  /** Owning tenant; null in single-tenant mode (worker falls back to env). */
+  organizationId: string | null;
   joinUrl: string;
   title: string | null;
   startsAt: Date;

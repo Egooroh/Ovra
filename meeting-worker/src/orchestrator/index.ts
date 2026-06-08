@@ -24,6 +24,8 @@ const WORKER_ENTRY = IS_DEV
 
 interface Slot {
   callId: string;
+  /** Owning tenant, for the per-tenant fairness cap. Null in single-tenant mode. */
+  organizationId: string | null;
   child: ChildProcess;
   lastHeartbeat: number;
 }
@@ -34,12 +36,27 @@ export class Orchestrator {
   private healthTimer?: NodeJS.Timeout;
   private stopping = false;
 
+  private processed = 0;
+  private failed = 0;
+  private statusTimer?: NodeJS.Timeout;
+
   async run(): Promise<void> {
     log.info("orchestrator.start");
     await this.recoverOrphans();
     this.pollTimer = setInterval(() => void this.tick(), config.orchestrator.pollIntervalMs);
     this.healthTimer = setInterval(() => void this.checkHealth(), config.orchestrator.heartbeatTimeoutMs / 2);
+    // Emit a status snapshot every minute so silence in the logs means trouble.
+    this.statusTimer = setInterval(() => this.logStatus(), 60_000);
     await this.tick();
+  }
+
+  private logStatus(): void {
+    log.info({
+      active: this.slots.size,
+      processed: this.processed,
+      failed: this.failed,
+      slots: [...this.slots.keys()],
+    }, "orchestrator.status");
   }
 
   /** On startup, any row left mid-flight from a previous crash gets reset. */
@@ -53,17 +70,31 @@ export class Orchestrator {
 
   private async tick(): Promise<void> {
     if (this.stopping) return;
-    const free = config.orchestrator.maxConcurrentCalls - this.slots.size;
+    let free = config.orchestrator.maxConcurrentCalls - this.slots.size;
     if (free <= 0) return;
 
+    // Current per-tenant occupancy from live slots, for the fairness cap.
+    const perTenant = new Map<string, number>();
+    for (const s of this.slots.values()) {
+      if (s.organizationId === null) continue; // cap never applies to untagged
+      perTenant.set(s.organizationId, (perTenant.get(s.organizationId) ?? 0) + 1);
+    }
+    const maxPerTenant = config.orchestrator.maxCallsPerTenant;
+
+    // Over-fetch: with a per-tenant cap, one tenant with many due calls would
+    // otherwise fill a `take: free` window and starve everyone else. Scan a
+    // wider, bounded batch ordered by start time and pick fairly across tenants.
+    const scanLimit = Math.max(config.orchestrator.maxConcurrentCalls * 20, 100);
     const dueBefore = new Date(Date.now() + config.orchestrator.joinLeadMs);
     const candidates = await prisma.call.findMany({
       where: { status: "SCHEDULED", startsAt: { lte: dueBefore } },
       orderBy: { startsAt: "asc" },
-      take: free,
+      take: scanLimit,
     });
 
     for (const c of candidates) {
+      if (free <= 0) break;
+
       if (c.attempts >= config.orchestrator.maxAttempts) {
         await prisma.call.update({
           where: { id: c.id },
@@ -71,24 +102,40 @@ export class Orchestrator {
         });
         continue;
       }
-      await this.claimAndFork({
+
+      // Fairness: a tagged tenant already at its cap is skipped this tick so its
+      // backlog can't monopolize slots. Untagged (single-tenant) calls bypass
+      // the cap — only the global maxConcurrentCalls ceiling applies to them.
+      const org = c.organizationId;
+      if (org !== null && (perTenant.get(org) ?? 0) >= maxPerTenant) continue;
+
+      const claimed = await this.claimAndFork({
         callId: c.id,
         sourceId: c.sourceId,
+        organizationId: org,
         joinUrl: c.joinUrl,
         title: c.title,
         startsAt: c.startsAt,
         endsAt: c.endsAt,
       });
+
+      if (claimed) {
+        free--;
+        if (org !== null) perTenant.set(org, (perTenant.get(org) ?? 0) + 1);
+      }
     }
   }
 
-  /** Atomic claim (CAS on status) prevents two ticks/instances double-forking. */
-  private async claimAndFork(ctx: CallContext): Promise<void> {
+  /**
+   * Atomic claim (CAS on status) prevents two ticks/instances double-forking.
+   * Returns true if this orchestrator won the claim and forked a worker.
+   */
+  private async claimAndFork(ctx: CallContext): Promise<boolean> {
     const claimed = await prisma.call.updateMany({
       where: { id: ctx.callId, status: "SCHEDULED" },
       data: { status: "CLAIMED", claimedAt: new Date() },
     });
-    if (claimed.count === 0) return; // someone else got it
+    if (claimed.count === 0) return false; // someone else got it
 
     const child = fork(WORKER_ENTRY, [], {
       execArgv: IS_DEV ? ["--require", "ts-node/register"] : [],
@@ -96,7 +143,12 @@ export class Orchestrator {
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
 
-    const slot: Slot = { callId: ctx.callId, child, lastHeartbeat: Date.now() };
+    const slot: Slot = {
+      callId: ctx.callId,
+      organizationId: ctx.organizationId,
+      child,
+      lastHeartbeat: Date.now(),
+    };
     this.slots.set(ctx.callId, slot);
 
     child.on("message", (m: WorkerToParent) => this.onWorkerMessage(slot, m));
@@ -105,13 +157,20 @@ export class Orchestrator {
 
     const startMsg: ParentToWorker = { type: "start", context: ctx };
     child.send(startMsg);
-    log.info({ callId: ctx.callId, pid: child.pid }, "orchestrator.forked");
+    log.info({ callId: ctx.callId, org: ctx.organizationId, pid: child.pid }, "orchestrator.forked");
+    return true;
   }
 
   private onWorkerMessage(slot: Slot, m: WorkerToParent): void {
     if (m.type === "heartbeat") slot.lastHeartbeat = m.at;
-    if (m.type === "ended") log.info({ callId: m.callId, reason: m.reason }, "orchestrator.call_ended");
-    if (m.type === "error" && m.fatal) log.error({ callId: m.callId, msg: m.message }, "orchestrator.worker_fatal");
+    if (m.type === "ended") {
+      this.processed++;
+      log.info({ callId: m.callId, reason: m.reason }, "orchestrator.call_ended");
+    }
+    if (m.type === "error" && m.fatal) {
+      this.failed++;
+      log.error({ callId: m.callId, msg: m.message }, "orchestrator.worker_fatal");
+    }
   }
 
   private onWorkerExit(slot: Slot, code: number | null): void {
@@ -139,6 +198,7 @@ export class Orchestrator {
     this.stopping = true;
     clearInterval(this.pollTimer);
     clearInterval(this.healthTimer);
+    clearInterval(this.statusTimer);
     for (const slot of this.slots.values()) {
       const msg: ParentToWorker = { type: "shutdown" };
       slot.child.send(msg);
