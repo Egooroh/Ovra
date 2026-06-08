@@ -302,15 +302,17 @@ func (s *Tasks) resolveAssignee(ctx context.Context, token, tenantID, name strin
 	if name == "" {
 		return nil, nil
 	}
-	want := strings.ToLower(strings.TrimSpace(name))
+	// Normalise: lowercase, trim, and drop a leading "@" so "@ivan" matches
+	// the stored tg_username "ivan"/"@ivan" and full names alike.
+	want := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(name)), "@")
 
 	// 1) Registered users table.
 	if users, err := s.store.ListUsersByTenant(ctx, tenantID); err != nil {
 		s.log.Warn("list registered users", "err", err)
 	} else {
 		for _, u := range users {
-			if strings.ToLower(u.FullName) == want ||
-				strings.ToLower(strings.TrimPrefix(u.TgUsername, "@")) == want {
+			uname := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(u.TgUsername)), "@")
+			if strings.ToLower(strings.TrimSpace(u.FullName)) == want || uname == want {
 				id := u.ID
 				if u.YougileUserID != "" {
 					return []string{u.YougileUserID}, &id

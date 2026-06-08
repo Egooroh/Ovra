@@ -135,11 +135,13 @@ export async function registerUser(
 
 export interface YougileProject { id: string; title: string; }
 
-// Сохранить креды YouGile воркспейса (онбординг админа). Только ключ.
-export async function saveYougileCreds(tenantId: string, apiKey: string): Promise<void> {
+export interface YougileCreds { api_key?: string; login?: string; password?: string; }
+
+// Сохранить креды YouGile воркспейса (API-ключ ИЛИ логин/пароль).
+export async function saveYougileCreds(tenantId: string, creds: YougileCreds): Promise<void> {
     const c = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/credentials`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: apiKey })
+        body: JSON.stringify(creds)
     });
     if (!c.ok) throw new Error(`saveYougileCreds HTTP ${c.status}`);
 }
