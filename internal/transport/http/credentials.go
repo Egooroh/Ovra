@@ -69,6 +69,18 @@ func (s *Server) handleSetCredentials(w http.ResponseWriter, r *http.Request) {
 		key = k
 	}
 
+	// Validate the key against YouGile before storing — reject obviously bad
+	// keys so the admin gets immediate feedback instead of a later 502.
+	if _, err := s.yg.ListProjects(r.Context(), key); err != nil {
+		var apiErr *yougile.APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
+			writeError(w, http.StatusBadRequest, "YouGile отклонил ключ (неверный или нет доступа)")
+			return
+		}
+		// Transient/network error — log and store anyway (the key may be valid).
+		s.log.Warn("validate yougile key", "tenant", tenant, "err", err)
+	}
+
 	enc, err := s.cipher.Seal(key)
 	if err != nil {
 		s.log.Error("seal token", "tenant", tenant, "err", err)

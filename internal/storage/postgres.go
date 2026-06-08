@@ -154,6 +154,19 @@ func (p *Postgres) SetWorkspaceColumns(ctx context.Context, tenantID string, c d
 	return nil
 }
 
+// SetWorkspaceProject sets the YouGile project a workspace maps to.
+func (p *Postgres) SetWorkspaceProject(ctx context.Context, tenantID, projectID string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE workspaces SET yougile_project_id = $2 WHERE id = $1`, tenantID, projectID)
+	if err != nil {
+		return fmt.Errorf("set workspace project: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- users ---
 
 func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, error) {

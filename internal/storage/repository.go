@@ -20,6 +20,7 @@ type Repository interface {
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
 	GetWorkspaceByChat(ctx context.Context, chatID string) (domain.Workspace, error)
 	SetWorkspaceColumns(ctx context.Context, tenantID string, c domain.Columns) error
+	SetWorkspaceProject(ctx context.Context, tenantID, projectID string) error
 
 	// YouGile credentials (set during bot onboarding). The token is stored
 	// encrypted; callers pass/receive ciphertext and use the secret package.

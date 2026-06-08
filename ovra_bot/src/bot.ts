@@ -2,7 +2,12 @@
 import { Telegraf, Markup, Context } from "telegraf";
 import { isPotentialTask } from "./utils/heuristics.js";
 import { parseMessageWithAI, type ParsedTask } from "./services/ai.js";
-import { sendTaskToOvraBackend } from "./services/backend.js";
+import {
+    sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
+    listYougileMembers, registerUser,
+    saveYougileCreds, listYougileProjects, setWorkspaceProject,
+    type YougileMember, type YougileProject
+} from "./services/backend.js";
 import crypto from "crypto";
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -23,9 +28,14 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
 let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || undefined;
 
 const recentMessages = new Map<number, string>();
-// Храним задачу вместе с чатом-источником, чтобы после одобрения уведомить группу.
-interface PendingTask { task: ParsedTask; originChatId?: number; }
+// Храним задачу вместе с воркспейсом и чатом-источником.
+interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: number; }
 const pendingTasks = new Map<string, PendingTask>();
+
+// Сессии онбординга (по user id):
+const awaitingKey = new Map<number, string>();                              // юзер → tenant: ждём API-ключ от админа
+const linkSessions = new Map<number, { tenant: string; members: YougileMember[] }>(); // юзер → выбор себя из YouGile
+const projectSessions = new Map<number, { tenant: string; projects: YougileProject[] }>(); // юзер → выбор проекта
 
 // --- СИСТЕМА ПРИВЯЗКИ ПОЛЬЗОВАТЕЛЕЙ (Маппинг) ---
 const MAPPING_FILE = path.resolve(process.cwd(), 'users.json');
@@ -47,20 +57,8 @@ function cleanUpCache() {
 }
 
 // Приветственное сообщение при добавлении бота в новую группу
-bot.on('my_chat_member', async (ctx) => {
-    const status = ctx.myChatMember.new_chat_member.status;
-    // Если бота только что добавили в группу или сделали админом
-    if (status === 'member' || status === 'administrator') {
-        await ctx.reply(
-            `👋 Всем привет! Я Ovra PM-Bot.\n\n` +
-            `Чтобы я мог корректно назначать на вас задачи, мне нужно связать ваши Telegram-теги с аккаунтами YouGile.\n\n` +
-            `Пожалуйста, каждый напишите прямо в этот чат команду:\n` +
-            `\`/bind Ваше Имя В YouGile\`\n\n` +
-            `Пример: \`/bind Иван Иванов\``, 
-            { parse_mode: 'Markdown' }
-        );
-    }
-});
+// (старый /bind-онбординг убран — теперь приветствие с deep-link ниже,
+//  см. единый bot.on('my_chat_member') и подвязку через кнопки)
 
 // Команда для привязки тега к имени YouGile
 bot.command('bind', async (ctx) => {
@@ -82,36 +80,82 @@ bot.command('bind', async (ctx) => {
 });
 
 bot.command('start', async (ctx) => {
-    if (ctx.chat.type === 'private') {
-        activePmChatId = ctx.chat.id;
-        
-        try {
-            const envPath = path.resolve(process.cwd(), '.env');
-            let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
-            
-            if (envContent.includes('PM_CHAT_ID=')) {
-                envContent = envContent.replace(/PM_CHAT_ID=.*/, `PM_CHAT_ID="${activePmChatId}"`);
-            } else {
-                envContent += `\nPM_CHAT_ID="${activePmChatId}"\n`;
-            }
-            
-            fs.writeFileSync(envPath, envContent);
-            await ctx.reply(`✅ Вы успешно назначены PM-ом (ID: ${activePmChatId})!\n\nЯ запомнил этот чат и записал его в конфиг. Теперь все карточки на одобрение будут приходить сюда.`);
-        } catch (err) {
-            console.error("Ошибка записи в .env:", err);
-            await ctx.reply(`✅ Вы назначены PM-ом на время текущей сессии (ID: ${activePmChatId}), но я не смог записать это в .env файл.`);
+    if (ctx.chat.type !== 'private') {
+        return ctx.reply('Напишите мне в личные сообщения 🙏 (или нажмите «Открыть бота» в рабочей группе).');
+    }
+    const userId = ctx.from.id;
+    activePmChatId = ctx.chat.id; // эта личка получает карточки на одобрение
+
+    // Deep-link payload = tenant_id воркспейса (из кнопки «Открыть бота»).
+    const payload = (ctx.message.text.split(' ').slice(1).join(' ') || '').trim();
+    if (!payload) {
+        return ctx.reply('Привет! 👋 Я Ovra.\nЧтобы подвязаться к доске — откройте меня кнопкой «Открыть бота» из вашей рабочей группы.');
+    }
+
+    const tenant = payload;
+    try {
+        const ws = await getWorkspaceInfo(tenant);
+
+        // 1) Не подключён → онбординг админа: просим API-ключ.
+        if (!ws.connected) {
+            awaitingKey.set(userId, tenant);
+            await ctx.reply(
+                '🔌 Доска ещё не подключена к YouGile.\n\n' +
+                'Если вы *администратор* — пришлите *API-ключ YouGile* одним сообщением ' +
+                '(настройки YouGile → API-ключи).',
+                { parse_mode: 'Markdown' }
+            );
+            return;
         }
-    } else {
-        await ctx.reply('Привет! Я PM-бот. Напиши мне команду /start в личные сообщения, чтобы я начал присылать тебе задачи на подтверждение.');
+
+        // 2) Подключён, но проект/колонки не выбраны → выбор проекта.
+        if (!ws.board_resolved) {
+            const projects = await listYougileProjects(tenant);
+            if (projects.length === 0) {
+                return ctx.reply('В YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
+            }
+            projectSessions.set(userId, { tenant, projects });
+            const buttons = projects.map((p, i) => [Markup.button.callback(p.title || `Проект ${i + 1}`, `proj_${i}`)]);
+            await ctx.reply('Выберите проект YouGile для этой группы:', Markup.inlineKeyboard(buttons));
+            return;
+        }
+
+        // 3) Всё готово → выбор себя из сотрудников.
+        const members = await listYougileMembers(tenant);
+        if (members.length === 0) {
+            return ctx.reply('В проекте YouGile пока нет сотрудников. Добавьте их и нажмите /start ещё раз.');
+        }
+        linkSessions.set(userId, { tenant, members });
+        const buttons = members.map((m, i) =>
+            [Markup.button.callback(m.name || m.email || `Сотрудник ${i + 1}`, `link_${i}`)]);
+        await ctx.reply('Выберите себя из списка сотрудников YouGile:', Markup.inlineKeyboard(buttons));
+    } catch (e) {
+        console.error('start:', e);
+        await ctx.reply('Не удалось получить данные доски. Попробуйте позже.');
     }
 });
 
 async function processTaskAndConfirm(ctx: Context, text: string) {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    // К какому воркспейсу привязан этот чат?
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws) {
+        if (ctx.chat?.type !== 'private')
+            await ctx.reply('⚠️ Этот чат не привязан к доске. Администратор: добавьте меня и дайте права администратора.');
+        return;
+    }
+    if (!ws.connected) {
+        await ctx.reply('⚠️ Доска ещё не подключена. Администратор: откройте меня в личке (/start) и подключите YouGile.');
+        return;
+    }
+
     const parsed = await parseMessageWithAI(text);
-    
+
     if (parsed && parsed.isTask) {
         const taskId = crypto.randomBytes(8).toString('hex');
-        pendingTasks.set(taskId, { task: parsed, originChatId: ctx.chat?.id });
+        pendingTasks.set(taskId, { task: parsed, tenantId: ws.tenant_id, originChatId: chatId });
         cleanUpCache();
 
         const messageText = `🆕 *Новая задача на подтверждение*\n` +
@@ -183,12 +227,34 @@ bot.command('stats', async (ctx) => {
 
 bot.on("text", async (ctx) => {
     const message = ctx.message;
-    recentMessages.set(message.message_id, message.text);
 
-    // В группе: если сообщение похоже на задачу — разбираем сразу. Эвристика
-    // (длина, нет "?", слово-триггер) отсекает болтовню, поэтому LLM зовётся
-    // редко и токены экономятся. Реакции ✍️/🔥 остаются ручным триггером.
-    if (ctx.chat.type !== "private" && isPotentialTask(message.text)) {
+    // Личка: ждём ли мы API-ключ от админа (онбординг доски)?
+    if (ctx.chat.type === 'private') {
+        const tenant = awaitingKey.get(ctx.from.id);
+        if (tenant) {
+            awaitingKey.delete(ctx.from.id);
+            try {
+                await saveYougileCreds(tenant, message.text.trim());
+                const projects = await listYougileProjects(tenant);
+                if (projects.length === 0) {
+                    await ctx.reply('🔑 Ключ принят, но в YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
+                    return;
+                }
+                projectSessions.set(ctx.from.id, { tenant, projects });
+                const buttons = projects.map((p, i) => [Markup.button.callback(p.title || `Проект ${i + 1}`, `proj_${i}`)]);
+                await ctx.reply('🔑 Ключ принят! Выберите проект YouGile для этой группы:', Markup.inlineKeyboard(buttons));
+            } catch (e) {
+                console.error('connect yougile:', e);
+                awaitingKey.set(ctx.from.id, tenant); // ждём ключ снова
+                await ctx.reply('❌ YouGile отклонил ключ (неверный или нет доступа).\nПришлите корректный *API-ключ* ещё раз.', { parse_mode: 'Markdown' });
+            }
+        }
+        return; // прочие личные сообщения не разбираем как задачи
+    }
+
+    // Группа: кэшируем + если похоже на задачу — разбираем (эвристика бережёт токены).
+    recentMessages.set(message.message_id, message.text);
+    if (isPotentialTask(message.text)) {
         await processTaskAndConfirm(ctx, message.text);
     }
 });
@@ -225,7 +291,7 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
     const description = taskData.description || "";
     const deadline = taskData.deadline || "";
 
-    const result = await sendTaskToOvraBackend(title, assignee, description, deadline, force);
+    const result = await sendTaskToOvraBackend(pending.tenantId, title, assignee, description, deadline, force);
 
     // Найдены похожие задачи — спрашиваем хоста, добавлять ли всё равно.
     if (result.isDuplicate && !force) {
@@ -324,6 +390,78 @@ bot.command('help', async (ctx) => {
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
     );
+});
+
+// Бота добавили в группу / сделали админом → создаём воркспейс и зовём в личку.
+bot.on('my_chat_member', async (ctx) => {
+    const upd = ctx.myChatMember;
+    if (!upd || upd.chat.type === 'private') return;
+    const status = upd.new_chat_member.status;
+    if (status !== 'administrator' && status !== 'member') return;
+
+    try {
+        const chat: any = upd.chat;
+        const ws = await createWorkspace(chat.id, chat.title || 'Группа', upd.from?.id || '');
+        const me = await ctx.telegram.getMe();
+        const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+        const adminNote = status === 'administrator' ? '' :
+            '\n\n⚠️ Дайте мне права *администратора*, чтобы я видел сообщения и реакции.';
+        await ctx.telegram.sendMessage(chat.id,
+            `👋 Привет! Я *Ovra* — превращаю поручения из чата в задачи YouGile.\n` +
+            `Нажмите кнопку ниже, чтобы подключить доску и подвязаться:` + adminNote,
+            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.url('🔗 Открыть бота', link)]) }
+        );
+    } catch (e) {
+        console.error('my_chat_member onboarding:', e);
+    }
+});
+
+// Админ выбрал проект YouGile для группы.
+bot.action(/^proj_(\d+)$/, async (ctx) => {
+    const idx = parseInt(ctx.match[1]!, 10);
+    const userId = ctx.from!.id;
+    const sess = projectSessions.get(userId);
+    if (!sess || !sess.projects[idx]) {
+        return ctx.answerCbQuery('Сессия устарела — нажмите /start ещё раз.');
+    }
+    const proj = sess.projects[idx];
+    try {
+        await ctx.answerCbQuery('Подключаю…');
+        await setWorkspaceProject(sess.tenant, proj.id);
+        projectSessions.delete(userId);
+        await ctx.editMessageText(
+            `✅ Доска подключена: *${proj.title}*\nКолонки распознаны.\n\nТеперь сотрудники могут нажать «Открыть бота» в группе и подвязаться к себе.`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (e) {
+        console.error('set project:', e);
+        await ctx.editMessageText('❌ Не удалось подключить доску. Попробуйте /start ещё раз.');
+    }
+});
+
+// Пользователь выбрал себя из списка сотрудников YouGile.
+bot.action(/^link_(\d+)$/, async (ctx) => {
+    const idx = parseInt(ctx.match[1]!, 10);
+    const userId = ctx.from!.id;
+    const sess = linkSessions.get(userId);
+    if (!sess || !sess.members[idx]) {
+        return ctx.answerCbQuery('Сессия устарела — нажмите /start ещё раз.');
+    }
+    const m = sess.members[idx];
+    try {
+        await ctx.answerCbQuery('Сохраняю…');
+        await registerUser(sess.tenant, {
+            tg_id: String(userId),
+            tg_username: ctx.from!.username ? `@${ctx.from!.username}` : '',
+            full_name: [ctx.from!.first_name, ctx.from!.last_name].filter(Boolean).join(' ') || (ctx.from!.username || ''),
+            yougile_user_id: m.id,
+        });
+        linkSessions.delete(userId);
+        await ctx.editMessageText(`✅ Готово! Вы привязаны к *${m.name || m.email}*.\nТеперь задачи из чата смогут назначаться на вас.`, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('link register:', e);
+        await ctx.editMessageText('❌ Не удалось сохранить привязку. Попробуйте позже.');
+    }
 });
 
 export { bot };

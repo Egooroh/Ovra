@@ -63,6 +63,7 @@ func (f *fakeRepo) SetWorkspaceColumns(_ context.Context, _ string, c domain.Col
 	f.savedCols = c
 	return nil
 }
+func (f *fakeRepo) SetWorkspaceProject(context.Context, string, string) error { return nil }
 func (f *fakeRepo) GetYougileTokenEnc(context.Context, string) (string, []byte, error) {
 	return "", f.tokenEnc, nil
 }

@@ -57,6 +57,18 @@ func (c *Client) CreateColumn(ctx context.Context, token, title, boardID string)
 		map[string]any{"title": title, "boardId": boardID}, "column")
 }
 
+// ListProjects returns the company's projects. GET /projects.
+func (c *Client) ListProjects(ctx context.Context, token string) ([]Project, error) {
+	if token == "" {
+		return nil, errors.New("yougile: missing token")
+	}
+	var env listEnvelope[Project]
+	if err := c.do(ctx, "GET", "/projects", token, nil, &env); err != nil {
+		return nil, err
+	}
+	return env.Content, nil
+}
+
 // ListBoards returns the boards of a project. GET /boards?projectId=...
 func (c *Client) ListBoards(ctx context.Context, token, projectID string) ([]Board, error) {
 	if token == "" {
