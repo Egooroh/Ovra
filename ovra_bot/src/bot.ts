@@ -4,7 +4,7 @@ import { isPotentialTask } from "./utils/heuristics.js";
 import { parseMessageWithAI, type ParsedTask } from "./services/ai.js";
 import {
     sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
-    listYougileMembers, registerUser,
+    listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject,
     type YougileMember, type YougileProject
 } from "./services/backend.js";
@@ -252,8 +252,30 @@ bot.on("text", async (ctx) => {
         return; // прочие личные сообщения не разбираем как задачи
     }
 
-    // Группа: кэшируем + если похоже на задачу — разбираем (эвристика бережёт токены).
+    // Группа: кэшируем.
     recentMessages.set(message.message_id, message.text);
+
+    // Telemost-ссылка в сообщении → планируем созвон без участия PM.
+    const telemostUrl = message.text.match(/https?:\/\/telemost\.yandex\.ru\/j\/[^\s]+/)?.[0];
+    if (telemostUrl) {
+        const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+        if (ws) {
+            try {
+                const result = await scheduleCallInOvra(ws.tenant_id, telemostUrl);
+                if (result.duplicate) {
+                    await ctx.reply('📅 Эта встреча уже запланирована — бот придёт.');
+                } else {
+                    await ctx.reply('📅 Принял! Бот придёт на этот созвон и пришлёт саммари.');
+                }
+            } catch (e) {
+                console.error('schedule call:', e);
+                await ctx.reply('❌ Не удалось запланировать созвон. Проверьте логи.');
+            }
+        }
+        return;
+    }
+
+    // Если похоже на задачу — разбираем (эвристика бережёт токены).
     if (isPotentialTask(message.text)) {
         await processTaskAndConfirm(ctx, message.text);
     }

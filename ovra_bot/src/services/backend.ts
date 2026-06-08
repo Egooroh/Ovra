@@ -152,6 +152,25 @@ export async function listYougileProjects(tenantId: string): Promise<YougileProj
     return (data.projects || []) as YougileProject[];
 }
 
+// Запланировать созвон по Telemost-ссылке из чата.
+export async function scheduleCallInOvra(
+    tenantId: string,
+    joinUrl: string,
+    title?: string,
+): Promise<{ id: string; duplicate?: boolean }> {
+    const url = `${BACKEND_URL}/v1/workspaces/${tenantId}/calls`;
+    const body: Record<string, string> = { join_url: joinUrl };
+    if (title) body.title = title;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Schedule call HTTP ${response.status}: ${JSON.stringify(data)}`);
+    return data as { id: string; duplicate?: boolean };
+}
+
 // Привязать проект к воркспейсу и распознать колонки доски.
 export async function setWorkspaceProject(tenantId: string, projectId: string): Promise<void> {
     const p = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/project`, {
