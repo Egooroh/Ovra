@@ -6,7 +6,8 @@ import {
     sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject,
-    type YougileMember, type YougileProject
+    listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
+    type YougileMember, type YougileProject, type CalendarAccount
 } from "./services/backend.js";
 import crypto from "crypto";
 import dotenv from 'dotenv';
@@ -36,6 +37,15 @@ const pendingTasks = new Map<string, PendingTask>();
 const awaitingKey = new Map<number, string>();                              // юзер → tenant: ждём API-ключ от админа
 const linkSessions = new Map<number, { tenant: string; members: YougileMember[] }>(); // юзер → выбор себя из YouGile
 const projectSessions = new Map<number, { tenant: string; projects: YougileProject[] }>(); // юзер → выбор проекта
+
+// Сессии добавления календарного аккаунта (по user id).
+interface CalendarSession {
+    tenant: string;
+    provider: 'google' | 'yandex';
+    step: 'json' | 'login' | 'password';
+    login?: string;
+}
+const calendarSessions = new Map<number, CalendarSession>();
 
 // --- СИСТЕМА ПРИВЯЗКИ ПОЛЬЗОВАТЕЛЕЙ (Маппинг) ---
 const MAPPING_FILE = path.resolve(process.cwd(), 'users.json');
@@ -189,6 +199,173 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
     }
 }
 
+// ---- Управление календарями ----
+
+function calendarMenuKeyboard(tenant: string) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📋 Список аккаунтов', `cal_list:${tenant}`)],
+        [Markup.button.callback('➕ Добавить Google', `cal_add_g:${tenant}`)],
+        [Markup.button.callback('➕ Добавить Яндекс', `cal_add_y:${tenant}`)],
+    ]);
+}
+
+function formatAccountList(accounts: CalendarAccount[], tenant: string): { text: string; keyboard: ReturnType<typeof Markup.inlineKeyboard> } {
+    if (accounts.length === 0) {
+        return {
+            text: '📅 Подключённых календарей нет.',
+            keyboard: Markup.inlineKeyboard([[Markup.button.callback('← Назад', `cal_menu:${tenant}`)]]),
+        };
+    }
+    const lines = accounts.map((a, i) => {
+        const name = a.label || (a.provider === 'google' ? 'Google Calendar' : 'Яндекс Календарь');
+        return `${i + 1}. ${a.provider === 'google' ? '🔵' : '🟡'} *${name}*\n   ID: \`${a.id.slice(0, 8)}…\``;
+    });
+    const deleteButtons = accounts.map(a =>
+        [Markup.button.callback(`🗑️ Удалить ${(a.label || a.id.slice(0, 8))}`, `cal_del:${a.id}:${tenant}`)]
+    );
+    return {
+        text: `📅 *Подключённые календари:*\n\n${lines.join('\n\n')}`,
+        keyboard: Markup.inlineKeyboard([
+            ...deleteButtons,
+            [Markup.button.callback('← Назад', `cal_menu:${tenant}`)],
+        ]),
+    };
+}
+
+async function processGoogleJson(ctx: Context, userId: number, sess: CalendarSession, jsonText: string) {
+    let creds: Record<string, unknown>;
+    try {
+        creds = JSON.parse(jsonText);
+    } catch {
+        await ctx.reply('❌ Это не валидный JSON. Пришлите ещё раз.');
+        return;
+    }
+    if (!creds.type || !creds.project_id) {
+        await ctx.reply('❌ Не похоже на Google service account (нужны поля `type`, `project_id`). Попробуйте ещё раз.', { parse_mode: 'Markdown' });
+        return;
+    }
+    calendarSessions.delete(userId);
+    try {
+        const account = await addCalendarAccount(sess.tenant, 'google', creds, 'Google Calendar');
+        await ctx.reply(`✅ *Google Calendar подключён!*\nID: \`${account.id}\``, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('addCalendarAccount google:', e);
+        await ctx.reply('❌ Не удалось подключить. Проверьте, что service account корректный.');
+    }
+}
+
+bot.command('calendar', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте эту команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) {
+        return ctx.reply('⚠️ Этот чат не привязан к доске.');
+    }
+    await ctx.reply('⚙️ *Управление Calendar*', {
+        parse_mode: 'Markdown',
+        ...calendarMenuKeyboard(ws.tenant_id),
+    });
+});
+
+// Показать меню (кнопка «Назад»).
+bot.action(/^cal_menu:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText('⚙️ *Управление Calendar*', {
+        parse_mode: 'Markdown',
+        ...calendarMenuKeyboard(ctx.match[1]!),
+    });
+});
+
+// Список аккаунтов.
+bot.action(/^cal_list:(.+)$/, async (ctx) => {
+    const tenant = ctx.match[1]!;
+    await ctx.answerCbQuery('Загружаю…');
+    try {
+        const accounts = await listCalendarAccounts(tenant);
+        const { text, keyboard } = formatAccountList(accounts, tenant);
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        console.error('listCalendarAccounts:', e);
+        await ctx.editMessageText('❌ Не удалось загрузить список. Проверьте логи.');
+    }
+});
+
+// Старт добавления Google-аккаунта.
+bot.action(/^cal_add_g:(.+)$/, async (ctx) => {
+    const tenant = ctx.match[1]!;
+    const userId = ctx.from!.id;
+    calendarSessions.set(userId, { tenant, provider: 'google', step: 'json' });
+    await ctx.answerCbQuery();
+    const me = await ctx.telegram.getMe();
+    await ctx.editMessageText(
+        '🔵 *Подключение Google Calendar*\n\n' +
+        'Пришлите JSON-файл *service account* (или вставьте содержимое текстом) ' +
+        'в личные сообщения боту.\n\n' +
+        '_Как получить: IAM → Service Accounts → Ключи → Добавить ключ → JSON._',
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
+        }
+    );
+});
+
+// Старт добавления Яндекс-аккаунта.
+bot.action(/^cal_add_y:(.+)$/, async (ctx) => {
+    const tenant = ctx.match[1]!;
+    const userId = ctx.from!.id;
+    calendarSessions.set(userId, { tenant, provider: 'yandex', step: 'login' });
+    await ctx.answerCbQuery();
+    const me = await ctx.telegram.getMe();
+    await ctx.editMessageText(
+        '🟡 *Подключение Яндекс Календаря*\n\n' +
+        'Откройте личку бота и введите *логин CalDAV* (обычно email @yandex.ru).',
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.url('💬 Открыть личку', `https://t.me/${me.username}`)]]),
+        }
+    );
+});
+
+// Удаление аккаунта. Формат: cal_del:<accountId>:<tenant>
+bot.action(/^cal_del:([^:]+):(.+)$/, async (ctx) => {
+    const accountId = ctx.match[1]!;
+    const tenant = ctx.match[2]!;
+    await ctx.answerCbQuery('Удаляю…');
+    try {
+        await deleteCalendarAccount(tenant, accountId);
+        const accounts = await listCalendarAccounts(tenant);
+        const { text, keyboard } = formatAccountList(accounts, tenant);
+        await ctx.editMessageText(`✅ Удалено.\n\n${text}`, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        console.error('deleteCalendarAccount:', e);
+        await ctx.editMessageText('❌ Не удалось удалить. Проверьте логи.');
+    }
+});
+
+// Получение JSON-файла (Google service account) в личке.
+bot.on('document', async (ctx) => {
+    if (ctx.chat.type !== 'private') return;
+    const userId = ctx.from.id;
+    const sess = calendarSessions.get(userId);
+    if (!sess || sess.provider !== 'google' || sess.step !== 'json') return;
+
+    const doc = ctx.message.document;
+    if (!doc.mime_type?.includes('json') && !doc.file_name?.endsWith('.json')) {
+        await ctx.reply('❌ Пришлите .json файл (или вставьте содержимое текстом).');
+        return;
+    }
+    try {
+        const link = await ctx.telegram.getFileLink(doc.file_id);
+        const resp = await fetch(link.href);
+        const content = await resp.text();
+        await processGoogleJson(ctx, userId, sess, content);
+    } catch (e) {
+        console.error('calendar document:', e);
+        await ctx.reply('❌ Не удалось обработать файл. Попробуйте ещё раз.');
+    }
+});
+
 bot.command('stats', async (ctx) => {
     const loadingMessage = await ctx.reply('⏳ Собираю статистику...');
 
@@ -249,6 +426,30 @@ bot.on("text", async (ctx) => {
                 await ctx.reply('❌ YouGile отклонил ключ (неверный или нет доступа).\nПришлите корректный *API-ключ* ещё раз.', { parse_mode: 'Markdown' });
             }
         }
+        // Ввод данных для подключения календаря.
+        const calSess = calendarSessions.get(ctx.from.id);
+        if (calSess) {
+            if (calSess.provider === 'google' && calSess.step === 'json') {
+                await processGoogleJson(ctx, ctx.from.id, calSess, message.text.trim());
+            } else if (calSess.provider === 'yandex' && calSess.step === 'login') {
+                calSess.login = message.text.trim();
+                calSess.step = 'password';
+                await ctx.reply('🟡 Теперь введите *пароль* (или пароль приложения для CalDAV):', { parse_mode: 'Markdown' });
+            } else if (calSess.provider === 'yandex' && calSess.step === 'password') {
+                const login = calSess.login!;
+                const password = message.text.trim();
+                calendarSessions.delete(ctx.from.id);
+                try {
+                    const account = await addCalendarAccount(calSess.tenant, 'yandex', { login, password }, 'Яндекс Календарь');
+                    await ctx.reply(`✅ *Яндекс Календарь подключён!*\nID: \`${account.id}\``, { parse_mode: 'Markdown' });
+                } catch (e) {
+                    console.error('addCalendarAccount yandex:', e);
+                    await ctx.reply('❌ Не удалось подключить. Проверьте логин и пароль.');
+                }
+            }
+            return;
+        }
+
         return; // прочие личные сообщения не разбираем как задачи
     }
 
