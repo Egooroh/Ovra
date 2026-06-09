@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"ovra/internal/config"
 	"ovra/internal/domain"
@@ -122,6 +123,11 @@ func (f *fakeRepo) ListWorkspaces(context.Context) ([]domain.Workspace, error) {
 	return out, nil
 }
 func (f *fakeRepo) DeleteExpiredTasks(context.Context) (int64, error) { return 0, nil }
+func (f *fakeRepo) ListDueReminders(context.Context, time.Duration) ([]domain.ReminderDue, error) {
+	return nil, nil
+}
+func (f *fakeRepo) MarkTaskReminded(context.Context, string) error { return nil }
+func (f *fakeRepo) SetConfirmMode(_ context.Context, _ string, _ string) error { return nil }
 func (f *fakeRepo) SetDigestSettings(_ context.Context, _ string, enabled bool, t string) error {
 	f.digestSettingsSaved.enabled = enabled
 	f.digestSettingsSaved.time = t

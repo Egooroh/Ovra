@@ -29,6 +29,7 @@ type workspaceResponse struct {
 	BoardResolved    bool   `json:"board_resolved"` // all four columns mapped
 	DigestEnabled    bool   `json:"digest_enabled"`
 	DigestTime       string `json:"digest_time"`
+	ConfirmMode      string `json:"confirm_mode"` // "admin_only" | "everyone"
 }
 
 // handleCreateWorkspace creates (or returns) the workspace bound to a chat.
@@ -197,7 +198,40 @@ func (s *Server) workspaceResp(ctx context.Context, ws domain.Workspace) workspa
 		BoardResolved:    ws.Columns.Todo != "" && ws.Columns.Done != "",
 		DigestEnabled:    ws.DigestEnabled,
 		DigestTime:       digestTime,
+		ConfirmMode:      confirmMode(ws.ConfirmMode),
 	}
+}
+
+func confirmMode(m string) string {
+	if m == "everyone" {
+		return "everyone"
+	}
+	return "admin_only"
+}
+
+// handleSetConfirmMode updates the task-confirmation mode for a workspace.
+func (s *Server) handleSetConfirmMode(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.Mode != "admin_only" && req.Mode != "everyone" {
+		writeError(w, http.StatusBadRequest, `mode must be "admin_only" or "everyone"`)
+		return
+	}
+	if err := s.repo.SetConfirmMode(r.Context(), tenant, req.Mode); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set confirm mode", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"confirm_mode": req.Mode})
 }
 
 // deriveTenantID makes a stable tenant id from a chat id (digits only).
