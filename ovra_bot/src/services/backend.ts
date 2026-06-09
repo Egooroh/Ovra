@@ -179,6 +179,7 @@ export interface SyncResult {
     moved: number;
     skipped: number;
     already_synced: number;
+    assignee_updated: number;
     errors: string[];
 }
 

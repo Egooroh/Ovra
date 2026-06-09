@@ -2,11 +2,13 @@
 // WebRtcCapture intercepts RTCPeerConnection tracks in the browser and
 // delivers labeled PCM per participant — works in headless mode on all OS.
 
+import type { Page } from "playwright";
 import { CallContext, WorkerEnv } from "../types";
 import { WorkerDeps } from "./deps";
 import { TelemostClient } from "./meeting/telemostClient";
 import { WebRtcCapture } from "./audio/webRtcCapture";
 import { SpeechKitTranscriber } from "./transcriber/speechKitTranscriber";
+import { buildLogoCameraHook } from "./video/logoCamera";
 import { log } from "../util/log";
 
 function deriveEnv(ctx: CallContext): WorkerEnv {
@@ -18,12 +20,20 @@ function deriveEnv(ctx: CallContext): WorkerEnv {
   };
 }
 
+function combineHooks(
+  ...hooks: Array<(page: Page) => Promise<void>>
+): (page: Page) => Promise<void> {
+  return async (page: Page) => {
+    for (const hook of hooks) await hook(page);
+  };
+}
+
 export async function buildDeps(ctx: CallContext): Promise<WorkerDeps> {
   const env = deriveEnv(ctx);
   log.info({ callId: ctx.callId, env, platform: process.platform }, "worker.buildDeps");
 
   const rtc = new WebRtcCapture();
-  const pageHook = rtc.asPageHook();
+  const pageHook = combineHooks(rtc.asPageHook(), buildLogoCameraHook());
 
   return {
     env,

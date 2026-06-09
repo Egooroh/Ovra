@@ -74,10 +74,11 @@ func (c *Client) CompleteTask(ctx context.Context, token, id string) error {
 
 // TaskInfo holds the fields Ovra needs when inspecting an existing card.
 type TaskInfo struct {
-	ColumnID  string `json:"columnId"`
-	Completed bool   `json:"completed"`
-	Archived  bool   `json:"archived"`
-	Deleted   bool   `json:"deleted"` // YouGile soft-delete; board hides it but GET still returns 200
+	ColumnID  string   `json:"columnId"`
+	Completed bool     `json:"completed"`
+	Archived  bool     `json:"archived"`
+	Deleted   bool     `json:"deleted"`  // YouGile soft-delete; board hides it but GET still returns 200
+	Assigned  []string `json:"assigned"` // YouGile user IDs (first element is the primary assignee)
 }
 
 // UnarchiveTask sets archived=false on a card so it appears on the board again.

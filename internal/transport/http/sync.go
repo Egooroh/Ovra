@@ -7,12 +7,13 @@ import (
 )
 
 type syncResult struct {
-	Checked       int      `json:"checked"`
-	Deleted       int      `json:"deleted"`       // missing in YouGile → soft-deleted in Ovra
-	Moved         int      `json:"moved"`         // existed but in wrong column → moved
-	Skipped       int      `json:"skipped"`       // done tasks with missing cards
-	AlreadySynced int      `json:"already_synced"`
-	Errors        []string `json:"errors"`
+	Checked          int      `json:"checked"`
+	Deleted          int      `json:"deleted"`           // missing in YouGile → soft-deleted in Ovra
+	Moved            int      `json:"moved"`             // existed but in wrong column → moved
+	Skipped          int      `json:"skipped"`           // done tasks with missing cards
+	AlreadySynced    int      `json:"already_synced"`
+	AssigneeUpdated  int      `json:"assignee_updated"`  // assignee pulled from YouGile → updated in Ovra
+	Errors           []string `json:"errors"`
 }
 
 // handleSync checks every non-deleted approved task against YouGile:
@@ -52,6 +53,19 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("sync: list tasks", "tenant", tenant, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	users, err := s.repo.ListUsersByTenant(r.Context(), tenant)
+	if err != nil {
+		s.log.Error("sync: list users", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	yougileToOvra := make(map[string]string, len(users))
+	for _, u := range users {
+		if u.YougileUserID != "" {
+			yougileToOvra[u.YougileUserID] = u.ID
+		}
 	}
 
 	res := syncResult{Errors: []string{}}
@@ -95,10 +109,36 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 					needsUpdate = true
 				}
 
+				// Sync assignee: YouGile → Ovra DB.
+				var newAssigneeID *string
+				if len(info.Assigned) > 0 {
+					if ovraID, ok := yougileToOvra[info.Assigned[0]]; ok {
+						newAssigneeID = &ovraID
+					}
+				}
+				currentID := ""
+				if t.AssigneeUserID != nil {
+					currentID = *t.AssigneeUserID
+				}
+				newID := ""
+				if newAssigneeID != nil {
+					newID = *newAssigneeID
+				}
+				assigneeChanged := currentID != newID
+				if assigneeChanged {
+					t.AssigneeUserID = newAssigneeID
+					if _, err := s.repo.UpdateTask(r.Context(), t); err != nil {
+						res.Errors = append(res.Errors, t.Title+": update assignee: "+err.Error())
+						continue
+					}
+					s.log.Info("sync: assignee updated", "task", t.ID, "was", currentID, "now", newID)
+					res.AssigneeUpdated++
+				}
+
 				if needsUpdate {
 					s.log.Info("sync: card fixed", "task", t.ID, "archived_was", info.Archived, "col_was", info.ColumnID)
 					res.Moved++
-				} else {
+				} else if !assigneeChanged {
 					res.AlreadySynced++
 				}
 				continue

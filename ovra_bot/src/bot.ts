@@ -120,7 +120,18 @@ bot.command('bind', async (ctx) => {
 
 bot.command('start', async (ctx) => {
     if (ctx.chat.type !== 'private') {
-        return ctx.reply('Напишите мне в личные сообщения 🙏 (или нажмите «Открыть бота» в рабочей группе).');
+        try {
+            const ws = await resolveTenant(ctx.chat.id);
+            if (ws) {
+                const me = await ctx.telegram.getMe();
+                const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+                return ctx.reply(
+                    'Нажмите кнопку ниже, чтобы привязать свой YouGile-аккаунт:',
+                    Markup.inlineKeyboard([[Markup.button.url('🔗 Открыть бота', link)]])
+                );
+            }
+        } catch {}
+        return ctx.reply('Напишите мне в личные сообщения 🙏');
     }
     const userId = ctx.from.id;
     activePmChatId = ctx.chat.id; // эта личка получает карточки на одобрение

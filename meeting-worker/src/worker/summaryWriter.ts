@@ -56,17 +56,23 @@ export async function writeSummary(
   });
 
   const fullText = transcript?.fullText?.trim() ?? "";
+
+  let summary = "";
+  let tasks: MeetingTask[] = [];
+
   if (!fullText) {
-    log.warn({ callId }, "summaryWriter: empty transcript, skipping");
-    return;
+    log.warn({ callId }, "summaryWriter: empty transcript, notifying without summary");
+    summary = "Во время встречи речь не была зафиксирована.";
+  } else {
+    log.info({ callId, chars: fullText.length }, "summaryWriter: starting");
+    const llmStart = Date.now();
+
+    ({ summary, tasks } = fullText.length <= CHUNK_CHARS
+      ? await summarizeDirect(fullText, title ?? "")
+      : await summarizeChunked(fullText, title ?? ""));
+
+    log.info({ callId, llmMs: Date.now() - llmStart, tasks: tasks.length }, "summaryWriter: llm done");
   }
-
-  log.info({ callId, chars: fullText.length }, "summaryWriter: starting");
-  const llmStart = Date.now();
-
-  const { summary, tasks } = fullText.length <= CHUNK_CHARS
-    ? await summarizeDirect(fullText, title ?? "")
-    : await summarizeChunked(fullText, title ?? "");
 
   const { url, workerSecret, tenantId } = config.backend;
   if (!url) {
@@ -109,7 +115,6 @@ export async function writeSummary(
     callId,
     created: result.created ?? 0,
     failures: result.failures?.length ?? 0,
-    llmMs: Date.now() - llmStart,
     tasks: tasks.length,
   }, "summaryWriter: done");
 }
