@@ -7,13 +7,13 @@ import (
 )
 
 type syncResult struct {
-	Checked          int      `json:"checked"`
-	Deleted          int      `json:"deleted"`           // missing in YouGile → soft-deleted in Ovra
-	Moved            int      `json:"moved"`             // existed but in wrong column → moved
-	Skipped          int      `json:"skipped"`           // done tasks with missing cards
-	AlreadySynced    int      `json:"already_synced"`
-	AssigneeUpdated  int      `json:"assignee_updated"`  // assignee pulled from YouGile → updated in Ovra
-	Errors           []string `json:"errors"`
+	Checked         int      `json:"checked"`
+	Deleted         int      `json:"deleted"`          // missing in YouGile → soft-deleted in Ovra
+	Unarchived      int      `json:"unarchived"`       // archived in YouGile but not done → unarchived
+	StatusUpdated   int      `json:"status_updated"`   // status pulled from YouGile column → updated in Ovra
+	AssigneeUpdated int      `json:"assignee_updated"` // assignee pulled from YouGile → updated in Ovra
+	AlreadySynced   int      `json:"already_synced"`
+	Errors          []string `json:"errors"`
 }
 
 // handleSync checks every non-deleted approved task against YouGile:
@@ -89,56 +89,68 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if info != nil {
-				needsUpdate := false
-
-				// Un-archive if hidden.
+				// Un-archive if hidden in YouGile but not done in Ovra.
 				if info.Archived && t.Status != domain.StatusDone {
 					if err := s.yg.UnarchiveTask(r.Context(), token, *t.YougileTaskID); err != nil {
 						res.Errors = append(res.Errors, t.Title+": unarchive: "+err.Error())
 						continue
 					}
-					needsUpdate = true
+					res.Unarchived++
 				}
 
-				// Move to correct column if wrong.
-				if info.ColumnID != wantCol && t.Status != domain.StatusDone {
-					if err := s.yg.MoveTask(r.Context(), token, *t.YougileTaskID, wantCol); err != nil {
-						res.Errors = append(res.Errors, t.Title+": move: "+err.Error())
-						continue
-					}
-					needsUpdate = true
-				}
+				var changed bool
 
-				// Sync assignee: YouGile → Ovra DB.
+				// Sync assignee: YouGile → Ovra.
 				var newAssigneeID *string
 				if len(info.Assigned) > 0 {
 					if ovraID, ok := yougileToOvra[info.Assigned[0]]; ok {
 						newAssigneeID = &ovraID
 					}
 				}
-				currentID := ""
+				currentAssigneeID := ""
 				if t.AssigneeUserID != nil {
-					currentID = *t.AssigneeUserID
+					currentAssigneeID = *t.AssigneeUserID
 				}
-				newID := ""
+				newAssigneeIDStr := ""
 				if newAssigneeID != nil {
-					newID = *newAssigneeID
+					newAssigneeIDStr = *newAssigneeID
 				}
-				assigneeChanged := currentID != newID
-				if assigneeChanged {
+				if currentAssigneeID != newAssigneeIDStr {
 					t.AssigneeUserID = newAssigneeID
-					if _, err := s.repo.UpdateTask(r.Context(), t); err != nil {
-						res.Errors = append(res.Errors, t.Title+": update assignee: "+err.Error())
-						continue
-					}
-					s.log.Info("sync: assignee updated", "task", t.ID, "was", currentID, "now", newID)
+					changed = true
 					res.AssigneeUpdated++
 				}
 
-				if needsUpdate {
-					s.log.Info("sync: card fixed", "task", t.ID, "archived_was", info.Archived, "col_was", info.ColumnID)
-					res.Moved++
-				} else if !assigneeChanged {
+				// Sync status: YouGile column → Ovra status.
+				var newStatus string
+				if info.Completed {
+					newStatus = domain.StatusDone
+				} else {
+					switch info.ColumnID {
+					case ws.Columns.Todo:
+						newStatus = domain.StatusTodo
+					case ws.Columns.InProgress:
+						newStatus = domain.StatusInProgress
+					case ws.Columns.Review:
+						newStatus = domain.StatusReview
+					case ws.Columns.Done:
+						newStatus = domain.StatusDone
+					}
+				}
+				if newStatus != "" && newStatus != t.Status {
+					t.Status = newStatus
+					changed = true
+					res.StatusUpdated++
+				}
+
+				if changed {
+					if _, err := s.repo.UpdateTask(r.Context(), t); err != nil {
+						res.Errors = append(res.Errors, t.Title+": update: "+err.Error())
+						continue
+					}
+					s.log.Info("sync: task updated from yougile", "task", t.ID,
+						"assignee", newAssigneeIDStr, "status", t.Status)
+				} else {
 					res.AlreadySynced++
 				}
 				continue

@@ -176,11 +176,26 @@ export async function getDigest(tenantId: string): Promise<DigestData> {
 export interface SyncResult {
     checked: number;
     deleted: number;
-    moved: number;
-    skipped: number;
-    already_synced: number;
+    unarchived: number;
+    status_updated: number;
     assignee_updated: number;
+    already_synced: number;
     errors: string[];
+}
+
+export interface BoardTask {
+    id: string;
+    title: string;
+    status: string;
+    approval_status: string;
+    deadline?: string | null;
+}
+
+export async function listTasks(tenantId: string): Promise<BoardTask[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/tasks`);
+    if (!res.ok) throw new Error(`listTasks HTTP ${res.status}`);
+    const data: any = await res.json();
+    return (data.tasks || []) as BoardTask[];
 }
 
 export async function syncWorkspace(tenantId: string): Promise<SyncResult> {

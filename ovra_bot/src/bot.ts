@@ -7,7 +7,7 @@ import {
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
-    deleteTask, getDigest, getTrash, clearTrash, syncWorkspace,
+    deleteTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
     type YougileMember, type YougileProject, type CalendarAccount
 } from "./services/backend.js";
 import crypto from "crypto";
@@ -1020,6 +1020,60 @@ bot.action(/^del_task_(.+)$/, async (ctx) => {
     }
 });
 
+// /board — показать все задачи сгруппированные по статусу (канбан-доска).
+bot.command('board', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('⏳ Загружаю доску…');
+    try {
+        const tasks = await listTasks(ws.tenant_id);
+        const approved = tasks.filter(t => t.approval_status === 'approved');
+
+        type TaskArr = typeof approved;
+        const groups: Record<string, TaskArr> = {
+            todo: [], in_progress: [], review: [], done: [],
+        };
+        for (const t of approved) {
+            const bucket = groups[t.status];
+            if (bucket) bucket.push(t);
+        }
+
+        const labels: Record<string, string> = {
+            todo: '🔵 В очереди',
+            in_progress: '🟡 В работе',
+            review: '🟣 На ревью',
+            done: '✅ Готово',
+        };
+
+        const lines = ['📋 *Доска задач*', '━━━━━━━━━━━━━━━━━━'];
+        let total = 0;
+        for (const status of ['todo', 'in_progress', 'review', 'done'] as const) {
+            const items: TaskArr = groups[status] ?? [];
+            lines.push(`\n${labels[status]} *(${items.length})*`);
+            for (const t of items) {
+                const dl = t.deadline
+                    ? ` · ${new Date(t.deadline) < new Date() ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                lines.push(`  • ${t.title}${dl}`);
+            }
+            total += items.length;
+        }
+        lines.push(`\n━━━━━━━━━━━━━━━━━━`);
+        lines.push(`Всего задач: ${total}`);
+
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('board:', e);
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            '❌ Не удалось загрузить доску.');
+    }
+});
+
 // /digest — прислать дайджест открытых задач по исполнителям.
 bot.command('digest', async (ctx) => {
     if (ctx.chat.type === 'private') {
@@ -1202,10 +1256,11 @@ bot.command('sync', async (ctx) => {
             `━━━━━━━━━━━━━━━━━━`,
             `🔍 Проверено задач: *${r.checked}*`,
             `🗑 Удалено из Ovra (нет в YouGile): *${r.deleted}*`,
-            `↗️ Перемещено в нужную колонку: *${r.moved}*`,
+            `📊 Обновлён статус из YouGile: *${r.status_updated}*`,
+            `👤 Обновлён исполнитель из YouGile: *${r.assignee_updated}*`,
             `⏭ Уже синхронизированы: *${r.already_synced}*`,
         ];
-        if (r.skipped > 0) lines.push(`📦 Завершённых пропущено: *${r.skipped}*`);
+        if (r.unarchived > 0) lines.push(`📂 Разархивировано в YouGile: *${r.unarchived}*`);
         if (r.errors.length > 0) {
             lines.push(`\n❌ *Ошибки (${r.errors.length}):*`);
             r.errors.slice(0, 5).forEach(e => lines.push(`  • ${e}`));

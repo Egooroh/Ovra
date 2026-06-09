@@ -79,7 +79,7 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 		}
 	}
 
-	deleted, assigneeUpdated := 0, 0
+	deleted, assigneeUpdated, statusUpdated := 0, 0, 0
 	for _, t := range tasks {
 		if t.ApprovalStatus != domain.ApprovalApproved {
 			continue
@@ -94,29 +94,58 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 			continue
 		}
 		if info != nil {
-			// Sync assignee: YouGile → Ovra DB.
+			var changed bool
+
+			// Sync assignee: YouGile → Ovra.
 			var newAssigneeID *string
 			if len(info.Assigned) > 0 {
 				if ovraID, ok := yougileToOvra[info.Assigned[0]]; ok {
 					newAssigneeID = &ovraID
 				}
 			}
-			currentID := ""
+			currentAssigneeID := ""
 			if t.AssigneeUserID != nil {
-				currentID = *t.AssigneeUserID
+				currentAssigneeID = *t.AssigneeUserID
 			}
-			newID := ""
+			newAssigneeIDStr := ""
 			if newAssigneeID != nil {
-				newID = *newAssigneeID
+				newAssigneeIDStr = *newAssigneeID
 			}
-			if currentID != newID {
+			if currentAssigneeID != newAssigneeIDStr {
 				t.AssigneeUserID = newAssigneeID
+				changed = true
+				assigneeUpdated++
+			}
+
+			// Sync status: YouGile column → Ovra status.
+			var newStatus string
+			if info.Completed {
+				newStatus = domain.StatusDone
+			} else {
+				switch info.ColumnID {
+				case ws.Columns.Todo:
+					newStatus = domain.StatusTodo
+				case ws.Columns.InProgress:
+					newStatus = domain.StatusInProgress
+				case ws.Columns.Review:
+					newStatus = domain.StatusReview
+				case ws.Columns.Done:
+					newStatus = domain.StatusDone
+				}
+			}
+			if newStatus != "" && newStatus != t.Status {
+				t.Status = newStatus
+				changed = true
+				statusUpdated++
+			}
+
+			if changed {
 				if _, err := s.store.UpdateTask(ctx, t); err != nil {
-					s.log.Warn("autosync: update assignee", "task", t.ID, "err", err)
+					s.log.Warn("autosync: update task", "task", t.ID, "err", err)
 					continue
 				}
-				s.log.Info("autosync: assignee updated", "task", t.ID, "was", currentID, "now", newID)
-				assigneeUpdated++
+				s.log.Info("autosync: task updated", "task", t.ID,
+					"assignee", newAssigneeIDStr, "status", t.Status)
 			}
 			continue
 		}
@@ -134,8 +163,8 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 		deleted++
 	}
 
-	if deleted > 0 || assigneeUpdated > 0 {
-		s.log.Info("autosync: tenant done", "tenant", ws.ID, "deleted", deleted, "assignee_updated", assigneeUpdated)
+	if deleted > 0 || assigneeUpdated > 0 || statusUpdated > 0 {
+		s.log.Info("autosync: tenant done", "tenant", ws.ID, "deleted", deleted, "assignee_updated", assigneeUpdated, "status_updated", statusUpdated)
 	}
 	return nil
 }
