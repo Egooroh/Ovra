@@ -53,7 +53,9 @@ const server = http.createServer(async (req, res) => {
 
         try {
             const payload = JSON.parse(body) as MeetingDonePayload;
+            console.log(`[meeting-done] chat_id=${payload.chat_id} tenant=${payload.tenant_id} tasks=${payload.tasks?.length ?? 0}`);
             await handleMeetingDone(payload);
+            console.log(`[meeting-done] ok`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
         } catch (e) {
