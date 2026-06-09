@@ -26,6 +26,18 @@ type fakeRepo struct {
 	savedCols  domain.Columns // captured by SetWorkspaceColumns
 	users      []domain.User  // returned by ListUsersByTenant
 	upserted   domain.User    // captured by UpsertUser
+
+	// soft-delete control
+	softDeletedTask domain.Task
+	softDeleteErr   error
+
+	// digest control
+	digestTasks       []domain.Task
+	digestSettingsSaved struct {
+		enabled bool
+		time    string
+	}
+	digestSettingsErr error
 }
 
 func newFakeRepo(ids ...string) *fakeRepo {
@@ -107,6 +119,29 @@ func (f *fakeRepo) FindSimilarOpenTasks(context.Context, string, string, float64
 }
 func (f *fakeRepo) ListOpenTasks(context.Context, string, int) ([]domain.Task, error) {
 	return nil, nil
+}
+func (f *fakeRepo) ListDigestTasks(context.Context, string) ([]domain.Task, error) {
+	return f.digestTasks, nil
+}
+func (f *fakeRepo) SoftDeleteTask(_ context.Context, _ string) (domain.Task, error) {
+	return f.softDeletedTask, f.softDeleteErr
+}
+func (f *fakeRepo) ListTrashTasks(context.Context, string) ([]domain.Task, error) {
+	return nil, nil
+}
+func (f *fakeRepo) ClearTrash(context.Context, string) (int64, error) { return 0, nil }
+func (f *fakeRepo) ListWorkspaces(context.Context) ([]domain.Workspace, error) {
+	var out []domain.Workspace
+	for _, ws := range f.workspaces {
+		out = append(out, ws)
+	}
+	return out, nil
+}
+func (f *fakeRepo) DeleteExpiredTasks(context.Context) (int64, error) { return 0, nil }
+func (f *fakeRepo) SetDigestSettings(_ context.Context, _ string, enabled bool, t string) error {
+	f.digestSettingsSaved.enabled = enabled
+	f.digestSettingsSaved.time = t
+	return f.digestSettingsErr
 }
 
 // testServer wires a Server with a real cipher and a YouGile client pointed at

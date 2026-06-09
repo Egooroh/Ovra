@@ -26,14 +26,23 @@ func (c *Client) ListUsers(ctx context.Context, token string) ([]User, error) {
 }
 
 // FindUserByName returns the user whose real name matches name (case-insensitive,
-// trimmed). Used to map an assignee name from Claude to a YouGile user id (B-06).
+// trimmed). Tries exact match first, then first-name-only match so that "Егор"
+// resolves to "Егор Иванов".
 func FindUserByName(users []User, name string) (User, bool) {
 	want := strings.ToLower(strings.TrimSpace(name))
 	if want == "" {
 		return User{}, false
 	}
+	// Pass 1: exact match.
 	for _, u := range users {
 		if strings.ToLower(strings.TrimSpace(u.RealName)) == want {
+			return u, true
+		}
+	}
+	// Pass 2: first-name match ("Егор" matches "Егор Иванов").
+	for _, u := range users {
+		first := strings.ToLower(strings.Fields(strings.TrimSpace(u.RealName))[0])
+		if first == want {
 			return u, true
 		}
 	}

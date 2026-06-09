@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,6 +18,7 @@ type credentialsRequest struct {
 	APIKey      string `json:"api_key"`
 	Login       string `json:"login"`
 	Password    string `json:"password"`
+	CompanyID   string `json:"company_id"`
 	CompanyName string `json:"company_name"`
 }
 
@@ -55,7 +57,7 @@ func (s *Server) handleSetCredentials(w http.ResponseWriter, r *http.Request) {
 	// Resolve the API key: use the supplied one, or generate via login/password.
 	key := req.APIKey
 	if key == "" {
-		k, err := s.yg.ObtainKey(r.Context(), req.Login, req.Password, req.CompanyName)
+		k, err := s.obtainYougileKey(r.Context(), req.Login, req.Password, req.CompanyID, req.CompanyName)
 		if err != nil {
 			var apiErr *yougile.APIError
 			if errors.As(err, &apiErr) {
@@ -103,6 +105,71 @@ func credentialSource(req credentialsRequest) string {
 		return "api_key"
 	}
 	return "login_password"
+}
+
+// obtainYougileKey resolves an API key via login/password, preferring an explicit
+// companyID; otherwise it disambiguates by companyName (or uses the sole company).
+// Shared by the bot-facing and Mini App credential handlers.
+func (s *Server) obtainYougileKey(ctx context.Context, login, password, companyID, companyName string) (string, error) {
+	if companyID != "" {
+		return s.yg.CreateKey(ctx, login, password, companyID)
+	}
+	return s.yg.ObtainKey(ctx, login, password, companyName)
+}
+
+// companiesView maps YouGile companies to the wire format used by the bot/mini-app.
+func companiesView(companies []yougile.Company) []map[string]any {
+	out := make([]map[string]any, len(companies))
+	for i, c := range companies {
+		out[i] = map[string]any{"id": c.ID, "name": c.Name, "is_admin": c.IsAdmin}
+	}
+	return out
+}
+
+// companiesRequest is the body of POST /v1/workspaces/{tenant}/yougile-companies.
+type companiesRequest struct {
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+// handleYouGileCompanies lists the YouGile companies reachable with the supplied
+// login/password so the admin can pick which one to generate a key for. The
+// password is used once and never stored.
+func (s *Server) handleYouGileCompanies(w http.ResponseWriter, r *http.Request) {
+	if s.yg == nil {
+		writeError(w, http.StatusServiceUnavailable, "disabled: YouGile client not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	if _, err := s.repo.GetWorkspace(r.Context(), tenant); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (companies)", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	var req companiesRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Login == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "login and password are required")
+		return
+	}
+	companies, err := s.yg.ListCompanies(r.Context(), req.Login, req.Password)
+	if err != nil {
+		var apiErr *yougile.APIError
+		if errors.As(err, &apiErr) {
+			writeError(w, http.StatusBadGateway, "yougile rejected credentials: "+apiErr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"companies": companiesView(companies)})
 }
 
 // decodeJSON strictly decodes a JSON request body with a size limit.

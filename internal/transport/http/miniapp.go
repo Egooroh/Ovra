@@ -181,6 +181,7 @@ type miniappConnectRequest struct {
 	APIKey      string `json:"api_key"`
 	Login       string `json:"login"`
 	Password    string `json:"password"`
+	CompanyID   string `json:"company_id"`
 	CompanyName string `json:"company_name"`
 }
 
@@ -242,7 +243,7 @@ func (s *Server) handleMiniAppConnect(w http.ResponseWriter, r *http.Request) {
 	// Resolve the API key.
 	key := req.APIKey
 	if key == "" {
-		k, err := s.yg.ObtainKey(r.Context(), req.Login, req.Password, req.CompanyName)
+		k, err := s.obtainYougileKey(r.Context(), req.Login, req.Password, req.CompanyID, req.CompanyName)
 		if err != nil {
 			var apiErr *yougile.APIError
 			if errors.As(err, &apiErr) {
@@ -368,4 +369,77 @@ func (s *Server) handleMiniAppWorkspaces(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/companies
+// ---------------------------------------------------------------------------
+
+type miniappCompaniesRequest struct {
+	InitData string `json:"init_data"`
+	TenantID string `json:"tenant_id"`
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+// handleMiniAppCompanies verifies the caller is the workspace admin, then lists
+// the YouGile companies reachable with the supplied login/password so the admin
+// can pick one. The password is used once and never stored.
+func (s *Server) handleMiniAppCompanies(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappCompaniesRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "init_data and tenant_id are required")
+		return
+	}
+	if req.Login == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "login and password are required")
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	user, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp companies)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if ws.HostTgID != fmt.Sprintf("%d", user.ID) {
+		writeError(w, http.StatusForbidden, "only the workspace admin can connect the board")
+		return
+	}
+
+	companies, err := s.yg.ListCompanies(r.Context(), req.Login, req.Password)
+	if err != nil {
+		var apiErr *yougile.APIError
+		if errors.As(err, &apiErr) {
+			writeError(w, http.StatusBadGateway, "yougile rejected credentials: "+apiErr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"companies": companiesView(companies)})
 }

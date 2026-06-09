@@ -34,6 +34,7 @@ type taskResponse struct {
 	Source         string  `json:"source"`
 	YougileTaskID  *string `json:"yougile_task_id"`
 	Deadline       *string `json:"deadline"`
+	DeletedAt      *string `json:"deleted_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 }
@@ -139,6 +140,56 @@ func (s *Server) writeUpdateTaskError(w http.ResponseWriter, task domain.Task, e
 		s.log.Error("update task", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+// handleListTrash returns tasks currently in the trash for a tenant.
+func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
+	tasks, err := s.repo.ListTrashTasks(r.Context(), r.PathValue("tenant"))
+	if err != nil {
+		s.log.Error("list trash", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": toTaskResponses(tasks)})
+}
+
+// handleClearTrash immediately removes all trashed tasks for a tenant.
+func (s *Server) handleClearTrash(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
+	n, err := s.repo.ClearTrash(r.Context(), r.PathValue("tenant"))
+	if err != nil {
+		s.log.Error("clear trash", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
+}
+
+// handleDeleteTask soft-deletes a task (moves it to the 24-h trash).
+func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
+	id := r.PathValue("id")
+	task, err := s.repo.SoftDeleteTask(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.log.Error("soft delete task", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
 // handleListTasks returns the tasks of a workspace (for the digest, FR-7).
@@ -248,6 +299,10 @@ func toTaskResponse(t domain.Task) taskResponse {
 	if t.Deadline != nil {
 		dl := t.Deadline.Format(time.RFC3339)
 		resp.Deadline = &dl
+	}
+	if t.DeletedAt != nil {
+		da := t.DeletedAt.Format(time.RFC3339)
+		resp.DeletedAt = &da
 	}
 	return resp
 }

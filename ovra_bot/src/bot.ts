@@ -5,9 +5,10 @@ import { parseMessageWithAI, type ParsedTask } from "./services/ai.js";
 import {
     sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
     listYougileMembers, registerUser, scheduleCallInOvra,
-    saveYougileCreds, listYougileProjects, setWorkspaceProject,
+    saveYougileCreds, listYougileProjects, setWorkspaceProject, listYougileCompanies,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
-    type YougileMember, type YougileProject, type CalendarAccount
+    deleteTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany
 } from "./services/backend.js";
 import crypto from "crypto";
 import dotenv from 'dotenv';
@@ -26,16 +27,18 @@ const agent = proxyUrl ? new SocksProxyAgent(proxyUrl) : undefined;
 const MINI_APP_URL = process.env.MINI_APP_URL || '';
 
 // Reply-keyboard buttons (private chat). Labels must match the bot.hears() below.
+// Only commands that make sense in a private chat are exposed here.
+// Group commands (/board, /digest, /sync, /trash) are available as slash-commands
+// in group chats; they are NOT shown in the private keyboard to avoid confusion.
+// The Mini App (profile + boards) is accessed via the left menu button (Ovra),
+// NOT via a keyboard webApp button — KeyboardButton.web_app runs in "data input"
+// mode and does not provide full Telegram.WebApp.initData.
 const BTN_STATUS = '📊 Статус';
 const BTN_HELP   = '❓ Помощь';
 
-// mainReplyKeyboard builds the persistent reply keyboard shown in private chats:
-// a Web App shortcut (👤 Профиль → Mini App) plus quick command buttons.
+// mainReplyKeyboard — two quick-action buttons shown in the private chat.
 function mainReplyKeyboard() {
-    const rows: (string | ReturnType<typeof Markup.button.webApp>)[][] = [];
-    if (MINI_APP_URL) rows.push([Markup.button.webApp('👤 Профиль', MINI_APP_URL)]);
-    rows.push([BTN_STATUS, BTN_HELP]);
-    return Markup.keyboard(rows).resize().persistent();
+    return Markup.keyboard([[BTN_STATUS, BTN_HELP]]).resize();
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
@@ -60,6 +63,13 @@ const confirmTarget = new Map<string, 'pm' | 'group'>(); // tenant_id → overri
 const awaitingKey = new Map<number, string>();                              // юзер → tenant: ждём API-ключ от админа
 const linkSessions = new Map<number, { tenant: string; members: YougileMember[] }>(); // юзер → выбор себя из YouGile
 const projectSessions = new Map<number, { tenant: string; projects: YougileProject[] }>(); // юзер → выбор проекта
+// Сессия входа по логину/паролю: шаги login → password → company (выбор из списка или ID).
+interface LoginSession { tenant: string; step: 'login' | 'password' | 'company'; login?: string; password?: string; companies?: YougileCompany[]; }
+const loginSessions = new Map<number, LoginSession>();
+
+// taskIdByMessage хранит backend task_id для кнопки «Удалить» после одобрения.
+// ключ — messageId сообщения «Задача создана», значение — task id из бэкенда.
+const taskIdByMessage = new Map<number, string>();
 
 // Задачи из созвона, ожидающие подтверждения в групповом чате.
 interface PendingMeetingTask {
@@ -133,7 +143,18 @@ bot.command('bind', async (ctx) => {
 
 bot.command('start', async (ctx) => {
     if (ctx.chat.type !== 'private') {
-        return ctx.reply('Напишите мне в личные сообщения 🙏 (или нажмите «Открыть бота» в рабочей группе).');
+        try {
+            const ws = await resolveTenant(ctx.chat.id);
+            if (ws) {
+                const me = await ctx.telegram.getMe();
+                const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+                return ctx.reply(
+                    'Нажмите кнопку ниже, чтобы привязать свой YouGile-аккаунт:',
+                    Markup.inlineKeyboard([[Markup.button.url('🔗 Открыть бота', link)]])
+                );
+            }
+        } catch {}
+        return ctx.reply('Напишите мне в личные сообщения 🙏');
     }
     const userId = ctx.from.id;
     activePmChatId = ctx.chat.id; // эта личка получает карточки на одобрение
@@ -153,14 +174,18 @@ bot.command('start', async (ctx) => {
     try {
         const ws = await getWorkspaceInfo(tenant);
 
-        // 1) Не подключён → онбординг админа: просим API-ключ.
+        // 1) Не подключён → онбординг админа: выбор способа подключения.
         if (!ws.connected) {
-            awaitingKey.set(userId, tenant);
             await ctx.reply(
                 '🔌 Доска ещё не подключена к YouGile.\n\n' +
-                'Если вы *администратор* — пришлите *API-ключ YouGile* одним сообщением ' +
-                '(настройки YouGile → API-ключи).',
-                { parse_mode: 'Markdown' }
+                'Если вы *администратор* — выберите способ подключения:',
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('🔑 У меня есть API-ключ', `conn_key:${tenant}`)],
+                        [Markup.button.callback('👤 Войти по логину и паролю', `conn_login:${tenant}`)],
+                    ]),
+                }
             );
             return;
         }
@@ -190,6 +215,68 @@ bot.command('start', async (ctx) => {
         console.error('start:', e);
         await ctx.reply('Не удалось получить данные доски. Попробуйте позже.');
     }
+});
+
+// continueToProjects — общий переход к выбору проекта после подключения доски.
+async function continueToProjects(ctx: Context, tenant: string) {
+    const userId = ctx.from!.id;
+    const projects = await listYougileProjects(tenant);
+    if (projects.length === 0) {
+        await ctx.reply('✅ Доска подключена, но в YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
+        return;
+    }
+    projectSessions.set(userId, { tenant, projects });
+    const buttons = projects.map((p, i) => [Markup.button.callback(p.title || `Проект ${i + 1}`, `proj_${i}`)]);
+    await ctx.reply('✅ Доска подключена! Выберите проект YouGile для этой группы:', Markup.inlineKeyboard(buttons));
+}
+
+// finishLogin — сохраняет креды по логину/паролю (+companyId) и ведёт к выбору проекта.
+async function finishLogin(ctx: Context, tenant: string, login: string, password: string, companyId: string) {
+    try {
+        await saveYougileCreds(tenant, { login, password, company_id: companyId });
+        await continueToProjects(ctx, tenant);
+    } catch (e) {
+        console.error('connect via login:', e);
+        await ctx.reply('❌ Не удалось получить ключ YouGile (проверьте логин/пароль/компанию). Нажмите /start, чтобы попробовать снова.');
+    }
+}
+
+// Онбординг: «У меня есть API-ключ» → ждём ключ сообщением.
+bot.action(/^conn_key:(.+)$/, async (ctx) => {
+    const tenant = ctx.match[1]!;
+    const userId = ctx.from!.id;
+    loginSessions.delete(userId);
+    awaitingKey.set(userId, tenant);
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+        '🔑 Пришлите *API-ключ YouGile* одним сообщением (настройки YouGile → API-ключи).',
+        { parse_mode: 'Markdown' }
+    );
+});
+
+// Онбординг: «Войти по логину и паролю» → пошаговый вход.
+bot.action(/^conn_login:(.+)$/, async (ctx) => {
+    const tenant = ctx.match[1]!;
+    const userId = ctx.from!.id;
+    awaitingKey.delete(userId);
+    loginSessions.set(userId, { tenant, step: 'login' });
+    await ctx.answerCbQuery();
+    await ctx.editMessageText('👤 Пришлите *логин* (email) от YouGile:', { parse_mode: 'Markdown' });
+});
+
+// Онбординг: выбор компании из списка (когда у аккаунта их несколько).
+bot.action(/^comp_(\d+)$/, async (ctx) => {
+    const idx = parseInt(ctx.match[1]!, 10);
+    const userId = ctx.from!.id;
+    const sess = loginSessions.get(userId);
+    if (!sess || sess.step !== 'company' || !sess.companies || !sess.companies[idx]) {
+        return ctx.answerCbQuery('Сессия устарела — нажмите /start ещё раз.');
+    }
+    const company = sess.companies[idx];
+    loginSessions.delete(userId);
+    await ctx.answerCbQuery('Подключаю…');
+    await ctx.editMessageText(`🏢 Компания: *${company.name}*`, { parse_mode: 'Markdown' });
+    await finishLogin(ctx, sess.tenant, sess.login!, sess.password!, company.id);
 });
 
 // /setup — opens the Mini App panel for board admin registration.
@@ -553,12 +640,12 @@ async function sendStats(ctx: Context) {
     );
 }
 bot.command('stats', sendStats);
-// Reply-keyboard shortcuts — must be registered before the generic bot.on('text')
-// handler below, otherwise it swallows the button taps (sendHelp is hoisted).
+// Reply-keyboard shortcuts — registered before bot.on('text') so they are not
+// swallowed by the generic text handler.
 bot.hears(BTN_STATUS, sendStats);
-bot.hears(BTN_HELP, sendHelp);
+bot.hears(BTN_HELP,   sendHelp);
 
-bot.on("text", async (ctx) => {
+bot.on("text", async (ctx, next) => {
     const message = ctx.message;
 
     // Личка: ждём ли мы API-ключ от админа (онбординг доски)?
@@ -568,20 +655,51 @@ bot.on("text", async (ctx) => {
             awaitingKey.delete(ctx.from.id);
             try {
                 await saveYougileCreds(tenant, { api_key: message.text.trim() });
-                const projects = await listYougileProjects(tenant);
-                if (projects.length === 0) {
-                    await ctx.reply('🔑 Ключ принят, но в YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
-                    return;
-                }
-                projectSessions.set(ctx.from.id, { tenant, projects });
-                const buttons = projects.map((p, i) => [Markup.button.callback(p.title || `Проект ${i + 1}`, `proj_${i}`)]);
-                await ctx.reply('🔑 Ключ принят! Выберите проект YouGile для этой группы:', Markup.inlineKeyboard(buttons));
+                await continueToProjects(ctx, tenant);
             } catch (e) {
                 console.error('connect yougile:', e);
                 awaitingKey.set(ctx.from.id, tenant); // ждём ключ снова
                 await ctx.reply('❌ YouGile отклонил ключ (неверный или нет доступа).\nПришлите корректный *API-ключ* ещё раз.', { parse_mode: 'Markdown' });
             }
+            return;
         }
+
+        // Личка: пошаговый вход по логину/паролю (онбординг доски по паролю).
+        const loginSess = loginSessions.get(ctx.from.id);
+        if (loginSess) {
+            const text = message.text.trim();
+            if (loginSess.step === 'login') {
+                loginSess.login = text;
+                loginSess.step = 'password';
+                await ctx.reply('🔒 Теперь пришлите *пароль* от YouGile одним сообщением:', { parse_mode: 'Markdown' });
+            } else if (loginSess.step === 'password') {
+                loginSess.password = text;
+                try {
+                    const companies = await listYougileCompanies(loginSess.tenant, loginSess.login!, loginSess.password!);
+                    if (companies.length === 0) {
+                        loginSessions.delete(ctx.from.id);
+                        await ctx.reply('❌ У этого аккаунта нет компаний в YouGile.');
+                    } else if (companies.length === 1) {
+                        loginSessions.delete(ctx.from.id);
+                        await finishLogin(ctx, loginSess.tenant, loginSess.login!, loginSess.password!, companies[0].id);
+                    } else {
+                        loginSess.companies = companies;
+                        loginSess.step = 'company';
+                        const buttons = companies.map((c, i) => [Markup.button.callback(c.name || `Компания ${i + 1}`, `comp_${i}`)]);
+                        await ctx.reply('🏢 Выберите компанию (или пришлите её *ID* сообщением):', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+                    }
+                } catch (e) {
+                    console.error('list companies:', e);
+                    loginSess.step = 'login';
+                    await ctx.reply('❌ YouGile отклонил логин или пароль. Пришлите *логин* (email) ещё раз:', { parse_mode: 'Markdown' });
+                }
+            } else if (loginSess.step === 'company') {
+                loginSessions.delete(ctx.from.id);
+                await finishLogin(ctx, loginSess.tenant, loginSess.login!, loginSess.password!, text);
+            }
+            return;
+        }
+
         // Ввод данных для подключения календаря.
         const calSess = calendarSessions.get(ctx.from.id);
         if (calSess) {
@@ -608,6 +726,9 @@ bot.on("text", async (ctx) => {
 
         return; // прочие личные сообщения не разбираем как задачи
     }
+
+    // Команды в группе обрабатываются отдельными bot.command() хендлерами.
+    if (message.text.startsWith('/')) return next();
 
     // Группа: кэшируем.
     recentMessages.set(message.message_id, message.text);
@@ -697,15 +818,28 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
         return; // pending НЕ удаляем — нужен для кнопки «Да, добавить»
     }
 
-    // Успех.
-    await ctx.editMessageText(
+    // Успех — показываем кнопку «Удалить» если знаем backend task id.
+    const successText =
         `✅ *Задача создана в YouGile*\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
         `📌 *${title}*\n` +
         `👤 ${assignee || '—'}\n` +
-        `🔗 ID: \`${result.yougile_task_id || 'неизвестно'}\``,
-        { parse_mode: 'Markdown' }
-    );
+        `🔗 ID: \`${result.yougile_task_id || 'неизвестно'}\``;
+
+    const backendId: string | undefined = (result as any).id;
+    if (backendId) {
+        const sent = await ctx.editMessageText(successText, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback('🗑️ Удалить', `del_task_${backendId}`)
+            ])
+        });
+        if (typeof sent === 'object' && sent && 'message_id' in sent) {
+            taskIdByMessage.set(sent.message_id, backendId);
+        }
+    } else {
+        await ctx.editMessageText(successText, { parse_mode: 'Markdown' });
+    }
 
     // Уведомляем исходный чат (группу), что задача поставлена.
     if (pending.originChatId && pending.originChatId !== ctx.chat?.id) {
@@ -786,19 +920,29 @@ bot.command('confirm', async (ctx) => {
 });
 
 async function sendHelp(ctx: Context) {
+    const miniAppLine = MINI_APP_URL
+        ? `👈 *Кнопка «Ovra»* слева от поля ввода — профиль и все доски.\n\n`
+        : ``;
     await ctx.reply(
-        `🤖 *Ovra PM-bot*\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `Я слежу за чатом и превращаю поручения в карточки YouGile.\n\n` +
+        `🤖 *Ovra* — задачи из чата прямо в YouGile\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        miniAppLine +
         `*Как создать задачу:*\n` +
-        `• просто напиши поручение в чат (напр. «нужно сделать отчёт к пятнице»)\n` +
-        `• или поставь реакцию ✍️/🔥 на любое сообщение\n` +
-        `→ я пришлю карточку на подтверждение, жми *✅ Одобрить*.\n\n` +
-        `*Команды:*\n` +
-        `/start — назначить эту личку для подтверждений (ПМ)\n` +
-        `/confirm group — подтверждения в группу\n` +
-        `/confirm pm — подтверждения в личку ПМа\n` +
-        `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
+        `• Напиши поручение в групповом чате\n` +
+        `  _«Нужно сдать отчёт к пятнице» → карточка на подтверждение_\n` +
+        `• Поставь реакцию ✍️ или 🔥 на любое сообщение\n` +
+        `• Нажми *✅ Одобрить* — задача уйдёт в YouGile\n\n` +
+        `*Команды в групповом чате:*\n` +
+        `/board — канбан-доска по статусам\n` +
+        `/digest — сводка по исполнителям\n` +
+        `/sync — синхронизация с YouGile\n` +
+        `/trash — корзина (24 ч до удаления)\n` +
+        `/setup — подключить или переподключить YouGile\n` +
+        `/confirm group|pm — куда приходят подтверждения\n` +
+        `/calendar — Google / Яндекс Календарь\n` +
+        `/bind Имя — привязать @ к аккаунту YouGile\n\n` +
+        `*Команды в личке:*\n` +
+        `/start — онбординг новой доски\n` +
         `/stats — статус системы\n` +
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
@@ -882,11 +1026,21 @@ bot.action(/^link_(\d+)$/, async (ctx) => {
     const m = sess.members[idx];
     try {
         await ctx.answerCbQuery('Сохраняю…');
+        // Получаем воркспейс чтобы проверить, является ли регистрирующийся хостом.
+        let role = 'member';
+        try {
+            const wsInfo = await getWorkspaceInfo(sess.tenant);
+            if (wsInfo.host_tg_id && wsInfo.host_tg_id === String(userId)) {
+                role = 'admin';
+            }
+        } catch { /* нет данных о роли — ставим member */ }
+
         await registerUser(sess.tenant, {
             tg_id: String(userId),
             tg_username: ctx.from!.username ? `@${ctx.from!.username}` : '',
             full_name: [ctx.from!.first_name, ctx.from!.last_name].filter(Boolean).join(' ') || (ctx.from!.username || ''),
             yougile_user_id: m.id,
+            role,
         });
         linkSessions.delete(userId);
         await ctx.editMessageText(`✅ Готово! Вы привязаны к *${m.name || m.email}*.\nТеперь задачи из чата смогут назначаться на вас.`, { parse_mode: 'Markdown' });
@@ -1069,5 +1223,290 @@ bot.action(/^mtask_no_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.editMessageText('🗑️ Задача из созвона пропущена.');
 });
+
+// Удаление задачи через кнопку после одобрения (мягкое удаление, 24 ч корзина).
+bot.action(/^del_task_(.+)$/, async (ctx) => {
+    const taskId = ctx.match[1]!;
+    try {
+        await ctx.answerCbQuery('Удаляю…');
+        await deleteTask(taskId);
+        await ctx.editMessageText('🗑️ Задача перемещена в корзину (удалится через 24 ч).');
+    } catch (e) {
+        console.error('del_task:', e);
+        await ctx.answerCbQuery('❌ Не удалось удалить.');
+    }
+});
+
+// /board — показать все задачи сгруппированные по статусу (канбан-доска).
+async function sendBoard(ctx: Context) {
+    if (ctx.chat?.type === 'private') {
+        return ctx.reply(
+            MINI_APP_URL
+                ? '📋 Просматривайте задачи через кнопку *👤 Профиль* — выберите нужную доску.'
+                : 'Команда /board работает в групповом чате.',
+            { parse_mode: 'Markdown', ...mainReplyKeyboard() }
+        );
+    }
+    const ws = await resolveTenant(ctx.chat!.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('⏳ Загружаю доску…');
+    try {
+        const tasks = await listTasks(ws.tenant_id);
+        const approved = tasks.filter(t => t.approval_status === 'approved');
+
+        type TaskArr = typeof approved;
+        const groups: Record<string, TaskArr> = {
+            todo: [], in_progress: [], review: [], done: [],
+        };
+        for (const t of approved) {
+            const bucket = groups[t.status];
+            if (bucket) bucket.push(t);
+        }
+
+        const labels: Record<string, string> = {
+            todo: '🔵 В очереди',
+            in_progress: '🟡 В работе',
+            review: '🟣 На ревью',
+            done: '✅ Готово',
+        };
+
+        const lines = ['📋 *Доска задач*', '━━━━━━━━━━━━━━━━━━'];
+        let total = 0;
+        for (const status of ['todo', 'in_progress', 'review', 'done'] as const) {
+            const items: TaskArr = groups[status] ?? [];
+            lines.push(`\n${labels[status]} *(${items.length})*`);
+            for (const t of items) {
+                const dl = t.deadline
+                    ? ` · ${new Date(t.deadline) < new Date() ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                lines.push(`  • ${t.title}${dl}`);
+            }
+            total += items.length;
+        }
+        lines.push(`\n━━━━━━━━━━━━━━━━━━`);
+        lines.push(`Всего задач: ${total}`);
+
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('board:', e);
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            '❌ Не удалось загрузить доску.');
+    }
+}
+bot.command('board', sendBoard);
+
+// /digest — прислать дайджест открытых задач по исполнителям.
+async function sendDigest(ctx: Context) {
+    if (ctx.chat?.type === 'private') {
+        return ctx.reply('Команда /digest работает в групповом чате.', mainReplyKeyboard());
+    }
+    const ws = await resolveTenant(ctx.chat!.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('⏳ Собираю дайджест…');
+
+    try {
+        const data = await getDigest(ws.tenant_id);
+        const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
+            + (data.unassigned?.length ?? 0);
+
+        if (total === 0) {
+            await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+                '✅ Открытых задач нет — всё чисто!');
+            return;
+        }
+
+        const lines: string[] = [`📋 *Дайджест задач*\n━━━━━━━━━━━━━━━━━━`];
+
+        for (const assignee of data.assignees) {
+            const who = assignee.tg_username
+                ? `*${assignee.full_name}* (${assignee.tg_username})`
+                : `*${assignee.full_name}*`;
+            lines.push(`\n👤 ${who}`);
+            for (const t of assignee.tasks) {
+                const dl = t.deadline
+                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                const status = statusEmoji(t.status);
+                lines.push(`  ${status} ${t.title}${dl}`);
+            }
+        }
+
+        if (data.unassigned?.length) {
+            lines.push(`\n❓ *Без исполнителя*`);
+            for (const t of data.unassigned) {
+                const dl = t.deadline
+                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+            }
+        }
+
+        lines.push(`\n━━━━━━━━━━━━━━━━━━\n_Всего открытых: ${total}_`);
+
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('digest:', e);
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            '❌ Не удалось получить дайджест. Проверьте логи.');
+    }
+}
+bot.command('digest', sendDigest);
+
+// Формирует текст и кнопки для сообщения корзины.
+function buildTrashMessage(tasks: any[], tenantId: string): { text: string; keyboard: any } {
+    const lines: string[] = [
+        `🗑 *Корзина* — ${tasks.length} ${pluralTasks(tasks.length)}`,
+        `_Задачи автоматически удалятся через 24 ч после попадания в корзину_`,
+        `━━━━━━━━━━━━━━━━━━`,
+    ];
+    for (const t of tasks) {
+        const when = t.deleted_at
+            ? new Date(t.deleted_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : '?';
+        lines.push(`  • ${t.title}\n    _удалено ${when}_`);
+    }
+    const keyboard = Markup.inlineKeyboard([
+        Markup.button.callback(`🗑 Очистить корзину (${tasks.length})`, `trash_clear_${tenantId}`)
+    ]);
+    return { text: lines.join('\n'), keyboard };
+}
+
+function pluralTasks(n: number): string {
+    if (n % 10 === 1 && n % 100 !== 11) return 'задача';
+    if ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) return 'задачи';
+    return 'задач';
+}
+
+// /trash — показать задачи в корзине.
+async function sendTrashView(ctx: Context) {
+    if (ctx.chat?.type === 'private') {
+        return ctx.reply('Команда /trash работает в групповом чате.', mainReplyKeyboard());
+    }
+    const ws = await resolveTenant(ctx.chat!.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('⏳ Загружаю корзину…');
+    try {
+        const tasks = await getTrash(ws.tenant_id);
+        if (tasks.length === 0) {
+            await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+                '🗑 Корзина пуста — удалять нечего.');
+            return;
+        }
+        const { text, keyboard } = buildTrashMessage(tasks, ws.tenant_id);
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        console.error('trash:', e);
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            '❌ Не удалось загрузить корзину.');
+    }
+}
+bot.command('trash', sendTrashView);
+
+// Нажатие «Очистить корзину» → показываем подтверждение.
+bot.action(/^trash_clear_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const tenantId = ctx.match[1]!;
+    const tasks = await getTrash(tenantId).catch(() => [] as any[]);
+    if (tasks.length === 0) {
+        await ctx.editMessageText('🗑 Корзина уже пуста.');
+        return;
+    }
+    await ctx.editMessageText(
+        `⚠️ *Подтвердите очистку*\n\nБудет удалено *${tasks.length} ${pluralTasks(tasks.length)}* без возможности восстановления:\n\n` +
+        tasks.map((t: any) => `  • ${t.title}`).join('\n'),
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Да, удалить всё', `trash_confirm_${tenantId}`)],
+                [Markup.button.callback('❌ Отмена', `trash_cancel_${tenantId}`)],
+            ])
+        }
+    );
+});
+
+// Подтверждение очистки.
+bot.action(/^trash_confirm_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery('Очищаю…');
+    const tenantId = ctx.match[1]!;
+    try {
+        const deleted = await clearTrash(tenantId);
+        await ctx.editMessageText(
+            `✅ *Корзина очищена*\n\nУдалено задач: *${deleted}*`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (e) {
+        console.error('trash_confirm:', e);
+        await ctx.editMessageText('❌ Не удалось очистить корзину. Попробуйте ещё раз.');
+    }
+});
+
+// Отмена очистки → возвращаем список.
+bot.action(/^trash_cancel_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery('Отменено');
+    const tenantId = ctx.match[1]!;
+    try {
+        const tasks = await getTrash(tenantId);
+        if (tasks.length === 0) {
+            await ctx.editMessageText('🗑 Корзина пуста.');
+            return;
+        }
+        const { text, keyboard } = buildTrashMessage(tasks, tenantId);
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        await ctx.editMessageText('🗑 Корзина.');
+    }
+});
+
+// /sync — синхронизировать задачи Ovra с YouGile (пересоздать удалённые карточки).
+async function sendSync(ctx: Context) {
+    if (ctx.chat?.type === 'private') {
+        return ctx.reply('Команда /sync работает в групповом чате.', mainReplyKeyboard());
+    }
+    const ws = await resolveTenant(ctx.chat!.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('🔄 Синхронизирую с YouGile…');
+    try {
+        const r = await syncWorkspace(ws.tenant_id);
+        const lines = [
+            `🔄 *Синхронизация завершена*`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `🔍 Проверено задач: *${r.checked}*`,
+            `🗑 Удалено из Ovra (нет в YouGile): *${r.deleted}*`,
+            `📊 Обновлён статус из YouGile: *${r.status_updated}*`,
+            `👤 Обновлён исполнитель из YouGile: *${r.assignee_updated}*`,
+            `⏭ Уже синхронизированы: *${r.already_synced}*`,
+        ];
+        if (r.unarchived > 0) lines.push(`📂 Разархивировано в YouGile: *${r.unarchived}*`);
+        if (r.errors.length > 0) {
+            lines.push(`\n❌ *Ошибки (${r.errors.length}):*`);
+            r.errors.slice(0, 5).forEach(e => lines.push(`  • ${e}`));
+            if (r.errors.length > 5) lines.push(`  _…и ещё ${r.errors.length - 5}_`);
+        }
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('sync:', e);
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
+            '❌ Ошибка синхронизации. Проверьте что YouGile подключён (/stats).');
+    }
+}
+bot.command('sync', sendSync);
+
+function statusEmoji(status: string): string {
+    switch (status) {
+        case 'todo':        return '🔵';
+        case 'in_progress': return '🟡';
+        case 'review':      return '🟣';
+        case 'done':        return '✅';
+        default:            return '•';
+    }
+}
 
 export { bot };

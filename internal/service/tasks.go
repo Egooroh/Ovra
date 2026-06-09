@@ -310,9 +310,20 @@ func (s *Tasks) resolveAssignee(ctx context.Context, token, tenantID, name strin
 	if users, err := s.store.ListUsersByTenant(ctx, tenantID); err != nil {
 		s.log.Warn("list registered users", "err", err)
 	} else {
-		for _, u := range users {
+		matchUser := func(u domain.User) bool {
 			uname := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(u.TgUsername)), "@")
-			if strings.ToLower(strings.TrimSpace(u.FullName)) == want || uname == want {
+			full := strings.ToLower(strings.TrimSpace(u.FullName))
+			if full == want || uname == want {
+				return true
+			}
+			// First-name match: "Егор" matches stored full name "Егор Иванов".
+			if parts := strings.Fields(full); len(parts) > 0 && parts[0] == want {
+				return true
+			}
+			return false
+		}
+		for _, u := range users {
+			if matchUser(u) {
 				id := u.ID
 				if u.YougileUserID != "" {
 					return []string{u.YougileUserID}, &id

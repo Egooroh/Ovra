@@ -121,6 +121,143 @@ func TestFindSimilarOpenTasks(t *testing.T) {
 	}
 }
 
+func TestUserRole(t *testing.T) {
+	ctx := context.Background()
+	p := repo(t)
+
+	const tenant = "test-role-ws"
+	if err := p.UpsertWorkspace(ctx, domain.Workspace{ID: tenant, ChatID: "c", Name: "Role WS"}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+	t.Cleanup(func() { _, _ = p.Pool().Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, tenant) })
+
+	admin, err := p.UpsertUser(ctx, domain.User{TenantID: tenant, TgID: "1", FullName: "Иван", Role: domain.RoleAdmin})
+	if err != nil {
+		t.Fatalf("upsert admin: %v", err)
+	}
+	if admin.Role != domain.RoleAdmin {
+		t.Fatalf("role = %q, want admin", admin.Role)
+	}
+
+	// Default role when empty.
+	member, err := p.UpsertUser(ctx, domain.User{TenantID: tenant, TgID: "2", FullName: "Пётр"})
+	if err != nil {
+		t.Fatalf("upsert member: %v", err)
+	}
+	if member.Role != domain.RoleMember {
+		t.Fatalf("role = %q, want member", member.Role)
+	}
+
+	users, err := p.ListUsersByTenant(ctx, tenant)
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	admins := 0
+	for _, u := range users {
+		if u.Role == domain.RoleAdmin {
+			admins++
+		}
+	}
+	if admins != 1 {
+		t.Fatalf("admins = %d, want 1", admins)
+	}
+}
+
+func TestSoftDeleteAndTrashCleanup(t *testing.T) {
+	ctx := context.Background()
+	p := repo(t)
+
+	const tenant = "test-trash-ws"
+	if err := p.UpsertWorkspace(ctx, domain.Workspace{ID: tenant, ChatID: "c", Name: "Trash WS"}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+	t.Cleanup(func() { _, _ = p.Pool().Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, tenant) })
+
+	task, err := p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Задача в корзине"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	deleted, err := p.SoftDeleteTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if deleted.DeletedAt == nil {
+		t.Fatal("deleted_at must be set after soft delete")
+	}
+
+	// Task must not appear in normal list.
+	list, err := p.ListTasksByTenant(ctx, tenant)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	for _, t2 := range list {
+		if t2.ID == task.ID {
+			t.Fatal("soft-deleted task should not appear in ListTasksByTenant")
+		}
+	}
+
+	// Second soft-delete must return ErrNotFound.
+	if _, err := p.SoftDeleteTask(ctx, task.ID); !isNotFound(err) {
+		t.Fatalf("second soft-delete: want ErrNotFound, got %v", err)
+	}
+
+	// Manually backdate deleted_at to simulate expiry, then cleanup.
+	_, _ = p.Pool().Exec(ctx,
+		`UPDATE tasks SET deleted_at = now() - INTERVAL '25 hours' WHERE id = $1`, task.ID)
+	n, err := p.DeleteExpiredTasks(ctx)
+	if err != nil {
+		t.Fatalf("delete expired: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected at least one task to be physically deleted")
+	}
+}
+
+func TestDigest(t *testing.T) {
+	ctx := context.Background()
+	p := repo(t)
+
+	const tenant = "test-digest-ws"
+	if err := p.UpsertWorkspace(ctx, domain.Workspace{ID: tenant, ChatID: "c", Name: "Digest WS", DigestEnabled: true, DigestTime: "09:00"}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+	t.Cleanup(func() { _, _ = p.Pool().Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, tenant) })
+
+	// Only approved non-done tasks should appear.
+	approved, err := p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Одобренная", ApprovalStatus: domain.ApprovalApproved, Status: domain.StatusTodo})
+	if err != nil {
+		t.Fatalf("create approved task: %v", err)
+	}
+	_, _ = p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Ожидает", ApprovalStatus: domain.ApprovalPending})
+	done, _ := p.CreateTask(ctx, domain.Task{TenantID: tenant, Title: "Готово", ApprovalStatus: domain.ApprovalApproved, Status: domain.StatusDone})
+	_ = done
+
+	tasks, err := p.ListDigestTasks(ctx, tenant)
+	if err != nil {
+		t.Fatalf("list digest tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != approved.ID {
+		t.Fatalf("digest tasks = %d, want 1 approved non-done task", len(tasks))
+	}
+
+	// Digest settings update.
+	if err := p.SetDigestSettings(ctx, tenant, false, "18:00"); err != nil {
+		t.Fatalf("set digest settings: %v", err)
+	}
+	ws, err := p.GetWorkspace(ctx, tenant)
+	if err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if ws.DigestEnabled || ws.DigestTime != "18:00" {
+		t.Fatalf("digest settings not persisted: enabled=%v time=%q", ws.DigestEnabled, ws.DigestTime)
+	}
+}
+
+func isNotFound(err error) bool {
+	return err != nil && err.Error() == "storage: not found"
+}
+
 func TestTaskCRUD(t *testing.T) {
 	ctx := context.Background()
 	p := repo(t)

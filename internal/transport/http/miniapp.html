@@ -279,6 +279,70 @@
       margin: 24px auto;
     }
 
+    /* ── Toggle switch (digest on/off) ── */
+    .toggle { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .track {
+      position: absolute; cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,.18); border-radius: 24px; transition: .2s;
+    }
+    .track::before {
+      position: absolute; content: "";
+      height: 18px; width: 18px; left: 3px; bottom: 3px;
+      background: #fff; border-radius: 50%; transition: .2s;
+    }
+    input:checked + .track { background: var(--btn); }
+    input:checked + .track::before { transform: translateX(18px); }
+
+    /* ── Time input ── */
+    .time-input {
+      background: var(--bg); border: 1.5px solid rgba(0,0,0,.1);
+      border-radius: 8px; padding: 5px 10px;
+      font-size: 14px; color: var(--text); outline: none;
+    }
+    .time-input:focus { border-color: var(--btn); }
+
+    /* ── Secondary button ── */
+    .btn-secondary {
+      width: 100%; padding: 11px; margin-top: 8px;
+      background: transparent; color: var(--btn);
+      border: 1.5px solid var(--btn); border-radius: var(--radius);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: opacity .15s;
+    }
+    .btn-secondary:active { opacity: .7; }
+
+    /* ── Refresh icon button ── */
+    .btn-refresh {
+      background: none; border: none; color: var(--hint); cursor: pointer;
+      padding: 4px; border-radius: 6px; display: flex; align-items: center;
+    }
+    .btn-refresh:active { opacity: .6; }
+
+    /* ── Member card (tasks by participant) ── */
+    .member-card { background: var(--bg2); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; }
+    .member-header {
+      padding: 12px 14px; display: flex; align-items: center;
+      justify-content: space-between; cursor: pointer; user-select: none;
+    }
+    .member-header:active { opacity: .75; }
+    .member-name { font-weight: 600; font-size: 14px; }
+    .member-tasks { padding: 0 14px 10px; }
+    .member-tasks.collapsed { display: none; }
+    .chevron { transition: transform .2s; flex-shrink: 0; }
+
+    /* ── Task item inside member card ── */
+    .task-item {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,.05);
+    }
+    .task-item:last-child { border-bottom: none; padding-bottom: 0; }
+    .task-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+    .task-title { font-size: 14px; font-weight: 500; line-height: 1.3; }
+    .task-meta { font-size: 11px; color: var(--hint); margin-top: 2px; }
+    .task-overdue { color: #ef4444; }
+
     /* hide/show helpers */
     .hidden { display: none !important; }
   </style>
@@ -376,20 +440,22 @@
           <input type="password" id="inputPassword" placeholder="••••••••" autocomplete="current-password" />
         </div>
         <div class="field">
-          <label>Компания <span style="font-weight:400;text-transform:none;">(если несколько)</span></label>
-          <input type="text" id="inputCompany" placeholder="Оставьте пустым, если одна компания" autocomplete="off" />
+          <label>ID компании <span style="font-weight:400;text-transform:none;">(необязательно)</span></label>
+          <input type="text" id="inputCompanyId" placeholder="Оставьте пустым — покажем список" autocomplete="off" />
         </div>
-        <button class="btn-primary" id="btnConnectLogin" onclick="connectViaLogin()">Подключить</button>
+        <button class="btn-primary" id="btnConnectLogin" onclick="connectViaLogin()">Продолжить</button>
+        <!-- Company picker (shown when the account belongs to several companies) -->
+        <div id="companyPicker" class="hidden" style="margin-top:14px;">
+          <div class="section-title" style="padding:0 0 8px;">Выберите компанию</div>
+          <div id="companyList"></div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- ── Not admin notice ── -->
+  <!-- ── Not admin / member view ── -->
   <div id="notAdminSection" class="hidden">
-    <div class="msg">
-      Вы не являетесь администратором этого воркспейса.<br>
-      Только создатель группы может подключить доску YouGile.
-    </div>
+    <!-- populated dynamically by renderMemberView() -->
   </div>
 
   <!-- ── Project selection (shown when connected but no project) ── -->
@@ -400,23 +466,53 @@
     </div>
   </div>
 
-  <!-- ── All done ── -->
-  <div id="successSection" class="hidden">
-    <div class="success-block">
-      <div class="success-icon">
-        <svg width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="28" cy="28" r="27" fill="#22c55e" fill-opacity="0.12"></circle>
-          <circle cx="28" cy="28" r="17" fill="#22c55e"></circle>
-          <path d="M20.5 28.5l4.8 4.8 10.2-10.8" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></path>
-        </svg>
+  <!-- ── Dashboard (board connected + resolved) ── -->
+  <div id="dashboardSection" class="hidden">
+
+    <!-- Board settings card -->
+    <div class="section" style="margin-top:20px;">
+      <div class="section-title">Доска YouGile</div>
+      <div class="info-row">
+        <span class="info-label">Статус</span>
+        <span id="dashStatus"></span>
       </div>
-      <div class="success-title">Готово</div>
-      <div class="success-sub">
-        Доска YouGile подключена.<br>
-        Участники группы могут привязать себя к аккаунту YouGile через команду <b>/start</b> в боте.
+      <!-- Project name (admin only, loaded async) -->
+      <div id="dashProjectRow" class="info-row hidden">
+        <span class="info-label">Проект</span>
+        <span class="info-value" id="dashProjectName" style="max-width:60%;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">—</span>
+      </div>
+      <!-- Digest toggle (admin only) -->
+      <div id="dashDigestRow" class="info-row hidden">
+        <span class="info-label">Дайджест задач</span>
+        <label class="toggle">
+          <input type="checkbox" id="digestToggle" onchange="onDigestToggle()">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div id="dashDigestTimeRow" class="info-row hidden">
+        <span class="info-label">Время отправки</span>
+        <input type="time" id="digestTimeInput" class="time-input" onchange="onDigestTimeChange()">
       </div>
     </div>
-  </div>
+
+    <!-- Admin action buttons -->
+    <div class="section hidden" id="dashAdminActions">
+      <button class="btn-secondary" onclick="showChangeProject()">Сменить проект YouGile</button>
+      <button class="btn-secondary" onclick="showReconnect()">Переподключить YouGile</button>
+    </div>
+
+    <!-- Tasks by member -->
+    <div class="section" style="margin-top:20px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div class="section-title" style="margin-bottom:0;">Участники и задачи</div>
+        <button class="btn-refresh" onclick="refreshDashboard()" title="Обновить">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+        </button>
+      </div>
+      <div id="memberTasksList"></div>
+    </div>
+
+  </div><!-- /dashboardSection -->
 
 </div><!-- /mainContent -->
 
@@ -544,15 +640,19 @@ function openWorkspace(tid) {
 function renderMain() {
   hide('loadingSpinner');
 
-  const { user, workspace, isAdmin } = state;
+  const { user, workspace } = state;
+  // NOTE: backend sends "is_admin" (snake_case) — must read via state.is_admin, not destructuring.
+  const isAdmin = state.is_admin === true;
 
   // Profile
   const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
   el('profileName').textContent = fullName || 'Пользователь';
   if (user.username) el('profileUsername').textContent = '@' + user.username;
   el('avatarEl').textContent = (fullName[0] || '?').toUpperCase();
-
   el('profileBadge').innerHTML = roleBadge(isAdmin);
+
+  // Header subtitle
+  el('headerSub').textContent = isAdmin ? 'Настройка рабочей доски' : 'Информация о доске';
 
   // Workspace
   el('wsName').textContent = workspace.name || workspace.tenant_id;
@@ -560,16 +660,62 @@ function renderMain() {
 
   show('mainContent');
 
-  // Determine which panel to show
-  if (workspace.connected && workspace.board_resolved) {
-    show('successSection');
-  } else if (workspace.connected && !workspace.board_resolved) {
-    loadProjects();
-  } else if (!workspace.connected && isAdmin) {
-    show('connectSection');
-  } else if (!workspace.connected && !isAdmin) {
-    show('notAdminSection');
+  if (isAdmin) {
+    // ── Admin flow ────────────────────────────────────────────────────────────
+    if (workspace.connected && workspace.board_resolved) {
+      loadDashboard();
+    } else if (workspace.connected && !workspace.board_resolved) {
+      loadProjects();
+    } else {
+      show('connectSection');
+    }
+  } else {
+    // ── Member flow ───────────────────────────────────────────────────────────
+    if (workspace.connected && workspace.board_resolved) {
+      loadDashboard();
+    } else {
+      renderMemberView(workspace);
+    }
   }
+}
+
+// renderMemberView shows a context-appropriate read-only view for non-admin users.
+function renderMemberView(workspace) {
+  const section = el('notAdminSection');
+  let content;
+
+  if (workspace.connected && workspace.board_resolved) {
+    content =
+      '<div class="info-row" style="margin-top:10px;">' +
+        '<span class="info-label">Статус YouGile</span>' +
+        '<span>' + statusBadge(true, true) + '</span>' +
+      '</div>' +
+      '<div class="msg" style="color:var(--text);margin-top:10px;">' +
+        'Доска YouGile подключена и готова к работе.' +
+        '<br><span style="font-size:12px;color:var(--hint);margin-top:4px;display:block;">' +
+        'Чтобы привязать свой аккаунт YouGile, используйте команду <b>/start</b> в боте.' +
+        '</span>' +
+      '</div>';
+  } else if (workspace.connected && !workspace.board_resolved) {
+    content =
+      '<div class="msg" style="color:var(--text);margin-top:10px;">' +
+        'Доска подключается — администратор выбирает проект YouGile.' +
+        '<br><span style="font-size:12px;color:var(--hint);margin-top:4px;display:block;">' +
+        'Вернитесь чуть позже, всё заработает автоматически.' +
+        '</span>' +
+      '</div>';
+  } else {
+    content =
+      '<div class="msg" style="margin-top:10px;">' +
+        'Доска ещё не подключена к YouGile.' +
+        '<br><span style="font-size:12px;margin-top:4px;display:block;">' +
+        'Попросите создателя группы открыть мини-апп и подключить доску.' +
+        '</span>' +
+      '</div>';
+  }
+
+  section.innerHTML = content;
+  show('notAdminSection');
 }
 
 // ── Tab switching ────────────────────────────────────────────────────────────
@@ -618,33 +764,79 @@ async function connectViaApiKey() {
 // ── Connect via Login + Password ─────────────────────────────────────────────
 
 async function connectViaLogin() {
-  const login    = el('inputLogin').value.trim();
-  const password = el('inputPassword').value;
-  const company  = el('inputCompany').value.trim();
+  const login     = el('inputLogin').value.trim();
+  const password  = el('inputPassword').value;
+  const companyId = el('inputCompanyId').value.trim();
 
   if (!login)    { tg.showAlert('Введите логин'); return; }
   if (!password) { tg.showAlert('Введите пароль'); return; }
 
   const btn = el('btnConnectLogin');
   btn.disabled = true;
-  btn.textContent = 'Подключаю…';
+  btn.textContent = 'Проверяю…';
 
   try {
+    // Manual company ID → connect straight away.
+    if (companyId) {
+      await doConnectLogin(login, password, companyId);
+      return;
+    }
+    // Otherwise fetch the account's companies and decide.
+    const res = await api('/miniapp/companies', { init_data: initData, tenant_id: tenantId, login, password });
+    const companies = res.companies || [];
+    if (companies.length === 0) {
+      tg.showAlert('У этого аккаунта нет компаний в YouGile.');
+    } else if (companies.length === 1) {
+      await doConnectLogin(login, password, companies[0].id);
+    } else {
+      renderCompanyPicker(companies, login, password);
+    }
+  } catch (e) {
+    tg.showAlert('Ошибка: ' + (e.message || 'неизвестная ошибка'));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Продолжить';
+  }
+}
+
+// Render the list of companies for the user to pick (multiple-company accounts).
+function renderCompanyPicker(companies, login, password) {
+  const listEl = el('companyList');
+  listEl.innerHTML = '';
+  companies.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'project-item';
+    item.innerHTML =
+      '<div class="board-icon">' + escHtml(((c.name || '?').trim()[0] || '#').toUpperCase()) + '</div>' +
+      '<span class="project-name">' + escHtml(c.name || c.id) + '</span>';
+    item.onclick = () => doConnectLogin(login, password, c.id);
+    listEl.appendChild(item);
+  });
+  show('companyPicker');
+}
+
+// Obtain the key for a specific company and continue to project selection.
+async function doConnectLogin(login, password, companyId) {
+  const btn = el('btnConnectLogin');
+  btn.disabled = true;
+  btn.textContent = 'Подключаю…';
+  try {
     await api('/miniapp/connect', {
-      init_data:    initData,
-      tenant_id:    tenantId,
-      login:        login,
-      password:     password,
-      company_name: company || undefined,
+      init_data:  initData,
+      tenant_id:  tenantId,
+      login:      login,
+      password:   password,
+      company_id: companyId,
     });
     state.workspace.connected = true;
     hide('connectSection');
+    hide('companyPicker');
     loadProjects();
   } catch (e) {
     tg.showAlert('Ошибка: ' + (e.message || 'неизвестная ошибка'));
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Подключить';
+    btn.textContent = 'Продолжить';
   }
 }
 
@@ -697,7 +889,7 @@ async function selectProject(projectId, projectTitle) {
 
     state.workspace.board_resolved = true;
     hide('projectSection');
-    show('successSection');
+    loadDashboard();
     tg.MainButton.hide();
   } catch (e) {
     listEl.innerHTML = `<div class="msg err">Ошибка: ${escHtml(e.message)}</div>`;
@@ -719,6 +911,195 @@ function statusBadge(connected, resolved) {
   if (connected && resolved) { cls = 'ok';   label = 'Подключено'; }
   else if (connected)        { cls = 'warn'; label = 'Настройка проекта'; }
   return '<span class="status ' + cls + '"><span class="dot"></span>' + label + '</span>';
+}
+
+// ── Dashboard (connected + board resolved) ───────────────────────────────────
+
+async function loadDashboard() {
+  const { workspace } = state;
+  const isAdmin = state.is_admin === true;
+
+  el('dashStatus').innerHTML = statusBadge(true, true);
+
+  if (isAdmin) {
+    show('dashProjectRow');
+    show('dashDigestRow');
+    show('dashAdminActions');
+  }
+
+  show('dashboardSection');
+
+  const listEl = el('memberTasksList');
+  listEl.innerHTML = '<div class="spinner" style="margin:16px auto;"></div>';
+
+  try {
+    // Parallel: digest (tasks + settings) + project list (admin only for name lookup).
+    const digestPromise  = fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`);
+    const projectPromise = isAdmin
+      ? fetch(apiBase() + `/v1/workspaces/${tenantId}/yougile-projects`)
+      : Promise.resolve(null);
+
+    const [digestRes, projectsRes] = await Promise.all([digestPromise, projectPromise]);
+    if (!digestRes.ok) throw new Error(`digest HTTP ${digestRes.status}`);
+
+    const digestData = await digestRes.json();
+
+    // Digest settings (admin)
+    if (isAdmin) {
+      el('digestToggle').checked = !!digestData.digest_enabled;
+      el('digestTimeInput').value = digestData.digest_time || '09:00';
+      if (digestData.digest_enabled) show('dashDigestTimeRow');
+
+      // Project name lookup
+      if (projectsRes && projectsRes.ok) {
+        const pd = await projectsRes.json();
+        const match = (pd.projects || []).find(p => p.id === workspace.yougile_project_id);
+        el('dashProjectName').textContent = match
+          ? (match.title || match.id)
+          : (workspace.yougile_project_id
+              ? workspace.yougile_project_id.slice(0, 12) + '…'
+              : '—');
+      }
+    }
+
+    renderMemberTasks(digestData);
+  } catch (e) {
+    listEl.innerHTML = `<div class="msg err">Ошибка загрузки: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function refreshDashboard() {
+  const listEl = el('memberTasksList');
+  listEl.innerHTML = '<div class="spinner" style="margin:16px auto;"></div>';
+  try {
+    const res = await fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderMemberTasks(await res.json());
+  } catch (e) {
+    listEl.innerHTML = `<div class="msg err">Ошибка обновления: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// Renders collapsible per-member task cards.
+function renderMemberTasks(data) {
+  const listEl = el('memberTasksList');
+  listEl.innerHTML = '';
+
+  const STATUS_COLOR = { todo: '#3b82f6', in_progress: '#f59e0b', review: '#8b5cf6', done: '#22c55e' };
+  const STATUS_LABEL = { todo: 'В очереди', in_progress: 'В работе', review: 'На ревью', done: 'Готово' };
+
+  // Build groups: named assignees + optional "unassigned" bucket.
+  const groups = [...(data.assignees || [])];
+  if ((data.unassigned || []).length) {
+    groups.push({ full_name: 'Без исполнителя', tg_username: '', tasks: data.unassigned });
+  }
+
+  const nonEmpty = groups.filter(g => g.tasks && g.tasks.length > 0);
+
+  if (nonEmpty.length === 0) {
+    listEl.innerHTML = '<div class="msg" style="color:var(--text);">Нет открытых задач — всё в порядке!</div>';
+    return;
+  }
+
+  nonEmpty.forEach((group, idx) => {
+    const initials = group.full_name.trim().split(/\s+/).map(w => w[0] || '').slice(0, 2).join('').toUpperCase() || '?';
+    const isOpen = idx === 0;
+    const n = group.tasks.length;
+
+    const tasksHtml = group.tasks.map(t => {
+      const color = STATUS_COLOR[t.status] || 'var(--hint)';
+      const label = STATUS_LABEL[t.status] || t.status;
+      const dl = t.deadline
+        ? new Date(t.deadline).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
+        : '';
+      const overdueSpan = t.overdue ? '<span class="task-overdue"> · Просрочено</span>' : '';
+      const meta = [label, dl ? dl + (t.overdue ? '' : '') : ''].filter(Boolean).join(' · ');
+      return `<div class="task-item">
+        <div class="task-dot" style="background:${color};"></div>
+        <div>
+          <div class="task-title">${escHtml(t.title)}</div>
+          <div class="task-meta">${escHtml(meta)}${overdueSpan}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    const countLabel = `${n} ${pluralRu(n, 'задача', 'задачи', 'задач')}`;
+
+    const card = document.createElement('div');
+    card.className = 'member-card';
+    card.innerHTML =
+      `<div class="member-header" onclick="toggleMember(this)">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="board-icon" style="width:34px;height:34px;font-size:13px;">${escHtml(initials)}</div>
+          <div>
+            <div class="member-name">${escHtml(group.full_name)}</div>
+            ${group.tg_username ? `<div style="font-size:11px;color:var(--hint);">${escHtml(group.tg_username)}</div>` : ''}
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:12px;color:var(--hint);">${escHtml(countLabel)}</span>
+          <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transform:${isOpen ? 'rotate(180deg)' : 'rotate(0deg)'}"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </div>
+      </div>
+      <div class="member-tasks${isOpen ? '' : ' collapsed'}">${tasksHtml}</div>`;
+
+    listEl.appendChild(card);
+  });
+}
+
+// Expand/collapse a member card.
+function toggleMember(header) {
+  const tasksEl = header.nextElementSibling;
+  const chevron = header.querySelector('.chevron');
+  const nowCollapsed = tasksEl.classList.toggle('collapsed');
+  chevron.style.transform = nowCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
+}
+
+// Digest toggle: save immediately.
+async function onDigestToggle() {
+  const enabled = el('digestToggle').checked;
+  const time    = el('digestTimeInput').value || '09:00';
+  if (enabled) { show('dashDigestTimeRow'); } else { hide('dashDigestTimeRow'); }
+  try {
+    await fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, time }),
+    });
+  } catch (e) { tg.showAlert('Не удалось сохранить настройки дайджеста'); }
+}
+
+// Digest time input: save on change.
+async function onDigestTimeChange() {
+  const enabled = el('digestToggle').checked;
+  const time    = el('digestTimeInput').value;
+  if (!time) return;
+  try {
+    await fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, time }),
+    });
+  } catch (e) { tg.showAlert('Не удалось сохранить время'); }
+}
+
+// Admin: go back to project selection.
+function showChangeProject() {
+  hide('dashboardSection');
+  loadProjects();
+}
+
+// Admin: go back to connection form.
+function showReconnect() {
+  hide('dashboardSection');
+  hide('companyPicker');
+  show('connectSection');
+}
+
+// Russian plural helper.
+function pluralRu(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
 }
 
 // goHome — return from a board view to the profile / "my boards" screen.

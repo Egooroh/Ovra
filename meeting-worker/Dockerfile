@@ -34,7 +34,8 @@ COPY --from=build /app/proto ./proto
 COPY package.json ./
 COPY prisma ./prisma
 COPY scripts/docker-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Strip any CRLF (Windows checkout) so the shebang resolves on Linux, then chmod.
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Install Playwright's Chromium with all system dependencies
 RUN npx playwright install --with-deps chromium

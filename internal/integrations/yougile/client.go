@@ -21,8 +21,9 @@ import (
 	"time"
 )
 
-// DefaultBaseURL is the YouGile API v2 root (ru.yougile.com also works).
-const DefaultBaseURL = "https://yougile.com/api-v2"
+// DefaultBaseURL is the YouGile API v2 root.
+// ru.yougile.com is preferred in environments where yougile.com is blocked.
+const DefaultBaseURL = "https://ru.yougile.com/api-v2"
 
 // Client talks to the YouGile API. It is safe for concurrent use; the
 // per-workspace token is passed per call rather than stored on the client.

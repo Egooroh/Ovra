@@ -78,8 +78,11 @@ export interface WorkspaceInfo {
     tenant_id: string;
     chat_id: string;
     name: string;
+    host_tg_id: string;
     connected: boolean;       // подключены ли креды YouGile
     board_resolved: boolean;  // сопоставлены ли колонки
+    digest_enabled: boolean;
+    digest_time: string;      // "HH:MM"
 }
 
 export interface YougileMember {
@@ -117,14 +120,15 @@ export async function createWorkspace(chatId: string | number, name: string, hos
 export async function listYougileMembers(tenantId: string): Promise<YougileMember[]> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/yougile-users`);
     if (!res.ok) throw new Error(`listYougileMembers HTTP ${res.status}`);
-    const data = await res.json();
+    const data: any = await res.json();
     return (data.users || []) as YougileMember[];
 }
 
 // Зарегистрировать/привязать участника чата к YouGile-аккаунту.
+// role: "admin" | "member" (default "member")
 export async function registerUser(
     tenantId: string,
-    u: { tg_id: string; tg_username?: string; full_name: string; yougile_user_id?: string }
+    u: { tg_id: string; tg_username?: string; full_name: string; yougile_user_id?: string; role?: string }
 ): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -133,11 +137,104 @@ export async function registerUser(
     if (!res.ok) throw new Error(`registerUser HTTP ${res.status}`);
 }
 
+// Мягкое удаление задачи (перемещение в корзину на 24 ч).
+export async function deleteTask(taskId: string): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`deleteTask HTTP ${res.status}`);
+}
+
+// --- Дайджест ---
+
+export interface DigestTask {
+    id: string;
+    title: string;
+    status: string;
+    deadline?: string;
+    overdue: boolean;
+}
+
+export interface DigestAssignee {
+    full_name: string;
+    tg_username: string;
+    tasks: DigestTask[];
+}
+
+export interface DigestData {
+    tenant_id: string;
+    digest_enabled: boolean;
+    digest_time: string;
+    assignees: DigestAssignee[];
+    unassigned: DigestTask[];
+}
+
+export async function getDigest(tenantId: string): Promise<DigestData> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/digest`);
+    if (!res.ok) throw new Error(`getDigest HTTP ${res.status}`);
+    return await res.json() as DigestData;
+}
+
+export interface SyncResult {
+    checked: number;
+    deleted: number;
+    unarchived: number;
+    status_updated: number;
+    assignee_updated: number;
+    already_synced: number;
+    errors: string[];
+}
+
+export interface BoardTask {
+    id: string;
+    title: string;
+    status: string;
+    approval_status: string;
+    deadline?: string | null;
+}
+
+export async function listTasks(tenantId: string): Promise<BoardTask[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/tasks`);
+    if (!res.ok) throw new Error(`listTasks HTTP ${res.status}`);
+    const data: any = await res.json();
+    return (data.tasks || []) as BoardTask[];
+}
+
+export async function syncWorkspace(tenantId: string): Promise<SyncResult> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/sync`, { method: 'POST' });
+    if (!res.ok) throw new Error(`syncWorkspace HTTP ${res.status}`);
+    return await res.json() as SyncResult;
+}
+
+// Немедленная очистка корзины воркспейса.
+export async function clearTrash(tenantId: string): Promise<number> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/trash`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`clearTrash HTTP ${res.status}`);
+    const data: any = await res.json();
+    return data.deleted ?? 0;
+}
+
+// Список задач в корзине (soft-deleted, удалятся через 24 ч).
+export async function getTrash(tenantId: string): Promise<any[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/trash`);
+    if (!res.ok) throw new Error(`getTrash HTTP ${res.status}`);
+    const data: any = await res.json();
+    return data.tasks || [];
+}
+
+export async function updateDigestSettings(tenantId: string, enabled: boolean, time: string): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/digest`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, time }),
+    });
+    if (!res.ok) throw new Error(`updateDigestSettings HTTP ${res.status}`);
+}
+
 export interface YougileProject { id: string; title: string; }
 
-export interface YougileCreds { api_key?: string; login?: string; password?: string; }
+export interface YougileCreds { api_key?: string; login?: string; password?: string; company_id?: string; company_name?: string; }
 
-// Сохранить креды YouGile воркспейса (API-ключ ИЛИ логин/пароль).
+export interface YougileCompany { id: string; name: string; is_admin?: boolean; }
+
+// Сохранить креды YouGile воркспейса (API-ключ ИЛИ логин/пароль[+компания]).
 export async function saveYougileCreds(tenantId: string, creds: YougileCreds): Promise<void> {
     const c = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/credentials`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -146,11 +243,25 @@ export async function saveYougileCreds(tenantId: string, creds: YougileCreds): P
     if (!c.ok) throw new Error(`saveYougileCreds HTTP ${c.status}`);
 }
 
+// Список компаний YouGile по логину/паролю (для выбора при онбординге по паролю).
+export async function listYougileCompanies(tenantId: string, login: string, password: string): Promise<YougileCompany[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/yougile-companies`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login, password }),
+    });
+    if (!res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        throw new Error(data.error || `listYougileCompanies HTTP ${res.status}`);
+    }
+    const data: any = await res.json();
+    return data.companies || [];
+}
+
 // Список проектов YouGile (для выбора админом).
 export async function listYougileProjects(tenantId: string): Promise<YougileProject[]> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/yougile-projects`);
     if (!res.ok) throw new Error(`listYougileProjects HTTP ${res.status}`);
-    const data = await res.json();
+    const data: any = await res.json();
     return (data.projects || []) as YougileProject[];
 }
 

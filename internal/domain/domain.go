@@ -10,6 +10,12 @@ const (
 	ApprovalRejected = "rejected"
 )
 
+// User roles within a workspace.
+const (
+	RoleAdmin  = "admin"
+	RoleMember = "member"
+)
+
 // Board statuses, aligned with the workspace columns.
 const (
 	StatusTodo       = "todo"
@@ -43,6 +49,9 @@ type Workspace struct {
 	// Timezone (IANA, e.g. "Europe/Moscow") used to interpret deadline times
 	// that carry no timezone. Empty → global DEADLINE_TZ fallback.
 	Timezone string `yaml:"timezone"`
+	// Digest settings. DigestTime is "HH:MM" in the workspace timezone.
+	DigestEnabled bool   `yaml:"digest_enabled"`
+	DigestTime    string `yaml:"digest_time"`
 }
 
 // User is a workspace member mapped to their YouGile account.
@@ -53,6 +62,7 @@ type User struct {
 	TgUsername    string
 	FullName      string
 	YougileUserID string
+	Role          string // "admin" | "member"
 }
 
 // Task is a candidate or approved task; once approved it becomes a YouGile card.
@@ -71,6 +81,7 @@ type Task struct {
 	Source         string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	DeletedAt      *time.Time // non-nil → in trash; physically removed after 24 h
 }
 
 // Meeting is the source of meeting-derived tasks (transcript/summary).

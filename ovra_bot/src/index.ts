@@ -10,6 +10,10 @@ bot.telegram.setMyCommands([
     { command: "setup", description: "Открыть панель настройки доски (Мини-апп)" },
     { command: "confirm", description: "Куда слать подтверждения: group или pm" },
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
+    { command: "digest", description: "Дайджест открытых задач по исполнителям" },
+    { command: "board", description: "Все задачи по статусам (канбан-доска)" },
+    { command: "trash", description: "Задачи в корзине (удалятся через 24 ч)" },
+    { command: "sync", description: "Синхронизировать задачи с YouGile" },
     { command: "stats", description: "Статус системы" },
     { command: "help", description: "Как пользоваться ботом" },
 ]).catch(() => { /* не критично */ });
@@ -59,7 +63,9 @@ const server = http.createServer(async (req, res) => {
 
         try {
             const payload = JSON.parse(body) as MeetingDonePayload;
+            console.log(`[meeting-done] chat_id=${payload.chat_id} tenant=${payload.tenant_id} tasks=${payload.tasks?.length ?? 0}`);
             await handleMeetingDone(payload);
+            console.log(`[meeting-done] ok`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
         } catch (e) {
