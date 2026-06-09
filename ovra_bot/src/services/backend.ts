@@ -159,10 +159,12 @@ export async function scheduleCallInOvra(
     tenantId: string,
     joinUrl: string,
     title?: string,
+    startsAt?: string, // ISO-8601
 ): Promise<{ id: string; duplicate?: boolean }> {
     const url = `${BACKEND_URL}/v1/workspaces/${tenantId}/calls`;
     const body: Record<string, string> = { join_url: joinUrl };
     if (title) body.title = title;
+    if (startsAt) body.starts_at = startsAt;
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

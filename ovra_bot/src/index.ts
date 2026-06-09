@@ -7,11 +7,21 @@ import { bot, handleMeetingDone, type MeetingDonePayload } from "./bot.js";
 // перечисляем, иначе перестанут приходить команды/текст и нажатия кнопок.
 bot.telegram.setMyCommands([
     { command: "start", description: "Назначить эту личку для подтверждений (ПМ)" },
+    { command: "setup", description: "Открыть панель настройки доски (Мини-апп)" },
     { command: "confirm", description: "Куда слать подтверждения: group или pm" },
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
     { command: "stats", description: "Статус системы" },
     { command: "help", description: "Как пользоваться ботом" },
 ]).catch(() => { /* не критично */ });
+
+// Menu button (left of the input field): open the Mini App directly when an
+// HTTPS URL is configured; otherwise fall back to the default commands menu.
+const MINI_APP_URL = process.env.MINI_APP_URL || '';
+bot.telegram.setChatMenuButton(
+    MINI_APP_URL.startsWith('https://')
+        ? { menuButton: { type: 'web_app', text: 'Ovra', web_app: { url: MINI_APP_URL } } }
+        : { menuButton: { type: 'commands' } }
+).catch((e) => console.error('setChatMenuButton:', e));
 
 // Глобальный лог ошибок хендлеров — чтобы видеть, что падает на апдейтах.
 bot.catch((err, ctx) => {

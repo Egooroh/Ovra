@@ -37,6 +37,10 @@ services:
       # Интеграция с meeting-worker и ботом
       MEETING_WORKER_URL: "http://meeting-worker:3001"
       BOT_INTERNAL_URL: "http://bot:3000"
+      # Telegram Mini App — bot token для верификации initData; URL мини-аппа
+      # (публичный HTTPS) для кнопок в боте. Требует HTTPS в продакшене.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      MINI_APP_URL: "${MINI_APP_URL:-}"
     ports:
       - "8080:8080"
     volumes:
@@ -93,6 +97,9 @@ services:
       # Перекрываем сетевое значение: внутри compose-сети бэкенд — по имени сервиса,
       # а не localhost (это значение важнее того, что лежит в .env бота).
       BACKEND_URL: "http://app:8080"
+      DEADLINE_TZ: "${DEADLINE_TZ:-Europe/Moscow}"
+      # Публичный URL мини-аппа для web_app кнопок (должен быть HTTPS).
+      MINI_APP_URL: "${MINI_APP_URL:-}"
     # PROXY_URL в .env бота должен указывать на host.docker.internal (а не 127.0.0.1),
     # чтобы из контейнера дотянуться до прокси на хост-машине.
     extra_hosts:

@@ -52,6 +52,22 @@ func (f *fakeRepo) GetWorkspaceByChat(_ context.Context, chatID string) (domain.
 	return domain.Workspace{}, storage.ErrNotFound
 }
 
+func (f *fakeRepo) ListWorkspacesForTgUser(_ context.Context, tgID string) ([]domain.Workspace, error) {
+	var out []domain.Workspace
+	for _, ws := range f.workspaces {
+		member := ws.HostTgID == tgID
+		for _, u := range f.users {
+			if u.TenantID == ws.ID && u.TgID == tgID {
+				member = true
+			}
+		}
+		if member {
+			out = append(out, ws)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeRepo) SetYougileCredentials(_ context.Context, _ string, login string, enc []byte) error {
 	f.setLogin, f.setEnc = login, enc
 	return nil

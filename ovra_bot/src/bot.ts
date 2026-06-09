@@ -20,6 +20,24 @@ dotenv.config();
 const proxyUrl = process.env.PROXY_URL;
 const agent = proxyUrl ? new SocksProxyAgent(proxyUrl) : undefined;
 
+// Public HTTPS URL of the Telegram Mini App (served by the Go backend).
+// Must be set in .env for the web_app button to work.
+// Example: MINI_APP_URL=https://your-domain.com/miniapp/
+const MINI_APP_URL = process.env.MINI_APP_URL || '';
+
+// Reply-keyboard buttons (private chat). Labels must match the bot.hears() below.
+const BTN_STATUS = '📊 Статус';
+const BTN_HELP   = '❓ Помощь';
+
+// mainReplyKeyboard builds the persistent reply keyboard shown in private chats:
+// a Web App shortcut (👤 Профиль → Mini App) plus quick command buttons.
+function mainReplyKeyboard() {
+    const rows: (string | ReturnType<typeof Markup.button.webApp>)[][] = [];
+    if (MINI_APP_URL) rows.push([Markup.button.webApp('👤 Профиль', MINI_APP_URL)]);
+    rows.push([BTN_STATUS, BTN_HELP]);
+    return Markup.keyboard(rows).resize().persistent();
+}
+
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
     telegram: {
         ...(agent ? { agent: agent } : {})
@@ -123,7 +141,12 @@ bot.command('start', async (ctx) => {
     // Deep-link payload = tenant_id воркспейса (из кнопки «Открыть бота»).
     const payload = (ctx.message.text.split(' ').slice(1).join(' ') || '').trim();
     if (!payload) {
-        return ctx.reply('Привет! 👋 Я Ovra.\nЧтобы подвязаться к доске — откройте меня кнопкой «Открыть бота» из вашей рабочей группы.');
+        return ctx.reply(
+            'Привет! 👋 Я *Ovra*.\n\n' +
+            '👉 Кнопка *меню* (слева от поля ввода) открывает твой профиль и доски.\n' +
+            'Чтобы подключить новую доску — добавь меня в рабочую группу.',
+            { parse_mode: 'Markdown', ...mainReplyKeyboard() }
+        );
     }
 
     const tenant = payload;
@@ -166,6 +189,73 @@ bot.command('start', async (ctx) => {
     } catch (e) {
         console.error('start:', e);
         await ctx.reply('Не удалось получить данные доски. Попробуйте позже.');
+    }
+});
+
+// /setup — opens the Mini App panel for board admin registration.
+// Works both in private chats and group chats.
+// In a group chat it resolves the workspace and sends the Web App button.
+// In a private chat (without context) it asks the admin to use it in the group.
+bot.command('setup', async (ctx) => {
+    const isMiniAppAvailable = !!MINI_APP_URL;
+
+    if (ctx.chat.type === 'private') {
+        if (!isMiniAppAvailable) {
+            // Fall back to text instructions when MINI_APP_URL is not configured.
+            return ctx.reply(
+                '⚙️ Используйте команду /setup в рабочей группе, чтобы подключить доску YouGile.'
+            );
+        }
+        // If this is a deep-link start (/setup <tenant_id>) handle it directly.
+        const payload = (ctx.message.text.split(' ').slice(1).join(' ') || '').trim();
+        if (payload) {
+            const miniAppUrl = `${MINI_APP_URL}?tenant=${encodeURIComponent(payload)}`;
+            return ctx.reply(
+                '⚙️ *Настройка доски YouGile*\n\nНажмите кнопку ниже, чтобы открыть панель подключения:',
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.webApp('🔧 Открыть панель настройки', miniAppUrl)],
+                    ]),
+                }
+            );
+        }
+        return ctx.reply('Используйте /setup в групповом чате, чтобы настроить подключённую доску.');
+    }
+
+    // Group chat: resolve workspace.
+    try {
+        const ws = await resolveTenant(ctx.chat.id);
+        if (!ws) {
+            return ctx.reply('⚠️ Этот чат ещё не привязан к доске. Добавьте меня и дайте права администратора.');
+        }
+
+        if (isMiniAppAvailable) {
+            const miniAppUrl = `${MINI_APP_URL}?tenant=${encodeURIComponent(ws.tenant_id)}`;
+            return ctx.reply(
+                '⚙️ *Настройка доски YouGile*\n\nАдминистратор: нажмите кнопку ниже, чтобы подключить или изменить YouGile-доску через мини-апп:',
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.webApp('🔧 Открыть панель настройки', miniAppUrl)],
+                    ]),
+                }
+            );
+        }
+
+        // Fallback (no MINI_APP_URL): send the classic deep-link.
+        const me = await ctx.telegram.getMe();
+        const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+        return ctx.reply(
+            '⚙️ *Настройка доски YouGile*\n\nАдминистратор: откройте бота в личке и пройдите онбординг:',
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([Markup.button.url('🔗 Открыть бота', link)]),
+            }
+        );
+    } catch (e) {
+        console.error('setup:', e);
+        return ctx.reply('Не удалось получить данные доски. Попробуйте позже.');
     }
 });
 
@@ -417,7 +507,7 @@ bot.on('document', async (ctx) => {
     }
 });
 
-bot.command('stats', async (ctx) => {
+async function sendStats(ctx: Context) {
     const loadingMessage = await ctx.reply('⏳ Собираю статистику...');
 
     const proxyStatus = process.env.PROXY_URL ? `✅ Включен (${process.env.PROXY_URL})` : `❌ Выключен`;
@@ -458,10 +548,15 @@ bot.command('stats', async (ctx) => {
         ctx.chat.id, 
         loadingMessage.message_id, 
         undefined, 
-        statsText, 
+        statsText,
         { parse_mode: 'Markdown' }
     );
-});
+}
+bot.command('stats', sendStats);
+// Reply-keyboard shortcuts — must be registered before the generic bot.on('text')
+// handler below, otherwise it swallows the button taps (sendHelp is hoisted).
+bot.hears(BTN_STATUS, sendStats);
+bot.hears(BTN_HELP, sendHelp);
 
 bot.on("text", async (ctx) => {
     const message = ctx.message;
@@ -472,7 +567,7 @@ bot.on("text", async (ctx) => {
         if (tenant) {
             awaitingKey.delete(ctx.from.id);
             try {
-                await saveYougileCreds(tenant, message.text.trim());
+                await saveYougileCreds(tenant, { api_key: message.text.trim() });
                 const projects = await listYougileProjects(tenant);
                 if (projects.length === 0) {
                     await ctx.reply('🔑 Ключ принят, но в YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
@@ -523,9 +618,13 @@ bot.on("text", async (ctx) => {
         const ws = await resolveTenant(ctx.chat.id).catch(() => null);
         if (ws) {
             try {
-                const result = await scheduleCallInOvra(ws.tenant_id, telemostUrl);
+                const startsAt = parseCallTime(message.text);
+                const result = await scheduleCallInOvra(ws.tenant_id, telemostUrl, undefined, startsAt);
                 if (result.duplicate) {
                     await ctx.reply('📅 Эта встреча уже запланирована — бот придёт.');
+                } else if (startsAt) {
+                    const localTime = formatLocalTime(startsAt);
+                    await ctx.reply(`📅 Принял! Бот придёт на созвон в ${localTime} и пришлёт саммари.`);
                 } else {
                     await ctx.reply('📅 Принял! Бот придёт на этот созвон и пришлёт саммари.');
                 }
@@ -686,7 +785,7 @@ bot.command('confirm', async (ctx) => {
     return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
 });
 
-bot.command('help', async (ctx) => {
+async function sendHelp(ctx: Context) {
     await ctx.reply(
         `🤖 *Ovra PM-bot*\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
@@ -704,9 +803,10 @@ bot.command('help', async (ctx) => {
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
     );
-});
+}
+bot.command('help', sendHelp);
 
-// Бота добавили в группу / сделали админом → создаём воркспейс и зовём в личку.
+// Бота добавили в группу / сделали админом → создаём воркспейс и зовём настраивать доску.
 bot.on('my_chat_member', async (ctx) => {
     const upd = ctx.myChatMember;
     if (!upd || upd.chat.type === 'private') return;
@@ -717,13 +817,23 @@ bot.on('my_chat_member', async (ctx) => {
         const chat: any = upd.chat;
         const ws = await createWorkspace(chat.id, chat.title || 'Группа', upd.from?.id || '');
         const me = await ctx.telegram.getMe();
-        const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
         const adminNote = status === 'administrator' ? '' :
             '\n\n⚠️ Дайте мне права *администратора*, чтобы я видел сообщения и реакции.';
+
+        // Single clean CTA: open the Mini App when available, else the deep-link.
+        const buttons: ReturnType<typeof Markup.button.url | typeof Markup.button.webApp>[][] = [];
+        if (MINI_APP_URL) {
+            const miniAppUrl = `${MINI_APP_URL}?tenant=${encodeURIComponent(ws.tenant_id)}`;
+            buttons.push([Markup.button.webApp('🚀 Открыть Ovra', miniAppUrl)]);
+        } else {
+            const deepLink = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+            buttons.push([Markup.button.url('🚀 Открыть Ovra', deepLink)]);
+        }
+
         await ctx.telegram.sendMessage(chat.id,
             `👋 Привет! Я *Ovra* — превращаю поручения из чата в задачи YouGile.\n` +
-            `Нажмите кнопку ниже, чтобы подключить доску и подвязаться:` + adminNote,
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.url('🔗 Открыть бота', link)]) }
+            `Администратор: нажмите кнопку ниже, чтобы подключить доску YouGile:` + adminNote,
+            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
         );
     } catch (e) {
         console.error('my_chat_member onboarding:', e);
@@ -795,6 +905,74 @@ bot.action(/^cal_skip:(.+)$/, async (ctx) => {
         { parse_mode: 'Markdown' }
     );
 });
+
+// ---- Парсинг времени созвона из сообщения ----
+
+// Timezone for call scheduling — must match DEADLINE_TZ on the backend.
+const CALL_TZ = process.env.DEADLINE_TZ ?? 'Europe/Moscow';
+
+// Parses a time mention like "в 17:00", "в 17.00", "в 17 часов", "в 5pm"
+// from a message and returns an ISO-8601 string in the configured timezone.
+// Returns undefined if no time found.
+function parseCallTime(text: string): string | undefined {
+    // Match "в 17:00", "в 17.00", "в 17-00", "в 17 00", "в 17 часов/час"
+    const m = text.match(/\bв\s+(\d{1,2})(?:[:\.\-](\d{2}))?(?:\s*часов?|ч\.?)?\b/i);
+    if (!m) return undefined;
+
+    const hours = parseInt(m[1]!, 10);
+    const minutes = parseInt(m[2] ?? '0', 10);
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return undefined;
+
+    // Build a date in the target timezone for today.
+    const now = new Date();
+    // Format today's date parts in the target TZ.
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: CALL_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(now);
+
+    const get = (type: string) => parts.find(p => p.type === type)?.value ?? '0';
+    let year = parseInt(get('year'), 10);
+    let month = parseInt(get('month'), 10);
+    let day = parseInt(get('day'), 10);
+    const currentHour = parseInt(get('hour'), 10);
+
+    // If the requested time has already passed today, schedule for tomorrow.
+    if (hours < currentHour || (hours === currentHour && minutes <= parseInt(get('minute'), 10))) {
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tp = new Intl.DateTimeFormat('en-CA', {
+            timeZone: CALL_TZ,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(tomorrow);
+        year = parseInt(tp.find(p => p.type === 'year')?.value ?? '0', 10);
+        month = parseInt(tp.find(p => p.type === 'month')?.value ?? '0', 10);
+        day = parseInt(tp.find(p => p.type === 'day')?.value ?? '0', 10);
+    }
+
+    // Convert local time in CALL_TZ to UTC ISO string.
+    // We do this by formatting a UTC date that matches the local time.
+    const localStr = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:00`;
+    // Find the UTC offset at that moment in the target timezone.
+    const probe = new Date(`${localStr}Z`);
+    const offsetMin = (probe.getTime() - new Date(new Intl.DateTimeFormat('en-CA', {
+        timeZone: CALL_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(probe) + 'Z').getTime()) / 60000;
+
+    const utc = new Date(probe.getTime() - offsetMin * 60000);
+    return utc.toISOString();
+}
+
+function formatLocalTime(iso: string): string {
+    return new Intl.DateTimeFormat('ru-RU', {
+        timeZone: CALL_TZ,
+        hour: '2-digit', minute: '2-digit',
+        timeZoneName: 'short',
+    }).format(new Date(iso));
+}
 
 // ---- Саммари созвона и подтверждение задач из встречи ----
 

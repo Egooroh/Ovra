@@ -19,6 +19,9 @@ type Repository interface {
 	UpsertWorkspace(ctx context.Context, ws domain.Workspace) error
 	GetWorkspace(ctx context.Context, id string) (domain.Workspace, error)
 	GetWorkspaceByChat(ctx context.Context, chatID string) (domain.Workspace, error)
+	// ListWorkspacesForTgUser returns workspaces where the Telegram user is the
+	// host (admin) or a registered member — powers the Mini App profile screen.
+	ListWorkspacesForTgUser(ctx context.Context, tgID string) ([]domain.Workspace, error)
 	SetWorkspaceColumns(ctx context.Context, tenantID string, c domain.Columns) error
 	SetWorkspaceProject(ctx context.Context, tenantID, projectID string) error
 

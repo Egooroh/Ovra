@@ -71,6 +71,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/calendar/accounts", s.handleCreateCalendarAccount)
 	mux.HandleFunc("DELETE /v1/workspaces/{tenant}/calendar/accounts/{id}", s.handleDeleteCalendarAccount)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Telegram Mini App — board admin registration. Served at the root too so the
+	// BotFather "Main App" / direct-link URL works without the /miniapp/ path.
+	mux.HandleFunc("GET /{$}", s.handleMiniAppPage)
+	mux.HandleFunc("GET /miniapp/", s.handleMiniAppPage)
+	mux.HandleFunc("POST /miniapp/verify", s.handleMiniAppVerify)
+	mux.HandleFunc("POST /miniapp/connect", s.handleMiniAppConnect)
+	mux.HandleFunc("POST /miniapp/workspaces", s.handleMiniAppWorkspaces)
 	// Outermost first: recover panics, then log every request.
 	return s.recoverPanic(s.requestLogger(mux))
 }

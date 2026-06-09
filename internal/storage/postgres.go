@@ -105,6 +105,35 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 	return ws, nil
 }
 
+// ListWorkspacesForTgUser returns workspaces where tgID is the host or a
+// registered member, ordered by name. Powers the Mini App "my boards" screen.
+func (p *Postgres) ListWorkspacesForTgUser(ctx context.Context, tgID string) ([]domain.Workspace, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT DISTINCT w.id, w.chat_id, w.name, w.yougile_project_id,
+		       w.col_todo, w.col_in_progress, w.col_review, w.col_done,
+		       w.host_tg_id, w.timezone
+		FROM workspaces w
+		LEFT JOIN users u ON u.tenant_id = w.id
+		WHERE w.host_tg_id = $1 OR u.tg_id = $1
+		ORDER BY w.name`, tgID)
+	if err != nil {
+		return nil, fmt.Errorf("list workspaces for tg user: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Workspace
+	for rows.Next() {
+		var ws domain.Workspace
+		if err := rows.Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
+			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
+			&ws.HostTgID, &ws.Timezone); err != nil {
+			return nil, fmt.Errorf("scan workspace: %w", err)
+		}
+		out = append(out, ws)
+	}
+	return out, rows.Err()
+}
+
 // SetYougileCredentials stores the workspace login and the encrypted API token.
 func (p *Postgres) SetYougileCredentials(ctx context.Context, tenantID, login string, tokenEnc []byte) error {
 	ct, err := p.pool.Exec(ctx, `

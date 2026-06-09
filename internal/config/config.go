@@ -46,6 +46,14 @@ type Config struct {
 	// per-task user confirmation instead of being auto-created in YouGile.
 	// Empty → tasks are created automatically (legacy behaviour).
 	BotInternalURL string
+	// TelegramBotToken is the bot's token (used to verify Telegram Mini App
+	// initData via HMAC-SHA256).  Required for the /miniapp/* endpoints.
+	TelegramBotToken string
+	// MiniAppURL is the public HTTPS URL of the Telegram Mini App, e.g.
+	// https://your-domain.com/miniapp/.  The bot sends this URL as a web_app
+	// button; it must be HTTPS for Telegram to accept it.  Empty → the bot
+	// falls back to the deep-link flow only.
+	MiniAppURL string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -70,6 +78,8 @@ func Load() (*Config, error) {
 		WorkerSecret:     os.Getenv("WORKER_SECRET"),
 		MeetingWorkerURL: os.Getenv("MEETING_WORKER_URL"),
 		BotInternalURL:   os.Getenv("BOT_INTERNAL_URL"),
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		MiniAppURL:       os.Getenv("MINI_APP_URL"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")
