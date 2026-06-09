@@ -281,5 +281,36 @@ const LOGO_CAMERA_SCRIPT = `
     }
     return _origAddTrack.apply(this, args);
   };
+
+  // Patch 3: RTCPeerConnection.prototype.addTransceiver — covers newer Telemost
+  // builds that call addTransceiver(track|'video', init) instead of addTrack.
+  var _origAddTransceiver = RTCPeerConnection.prototype.addTransceiver;
+  RTCPeerConnection.prototype.addTransceiver = function (trackOrKind, init) {
+    var args = Array.prototype.slice.call(arguments);
+    var isVideoTrack = typeof trackOrKind === 'object' && trackOrKind !== null && trackOrKind.kind === 'video';
+    var isVideoKind  = typeof trackOrKind === 'string' && trackOrKind === 'video';
+    if (isVideoTrack || isVideoKind) {
+      var vt = getLogoVideoTrack();
+      if (vt) {
+        if (isVideoTrack) { args[0] = vt; }
+        var transceiver = _origAddTransceiver.apply(this, args);
+        // For the addTransceiver('video', ...) form the sender starts with no track.
+        if (isVideoKind) { transceiver.sender.replaceTrack(vt).catch(function () {}); }
+        return transceiver;
+      }
+    }
+    return _origAddTransceiver.apply(this, args);
+  };
+
+  // Patch 4: RTCRtpSender.prototype.replaceTrack — covers the sendrecv-transceiver
+  // pattern where addTransceiver creates an empty sender then replaceTrack feeds it.
+  var _origReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+  RTCRtpSender.prototype.replaceTrack = function (track) {
+    if (track && track.kind === 'video') {
+      var vt = getLogoVideoTrack();
+      if (vt) return _origReplaceTrack.call(this, vt);
+    }
+    return _origReplaceTrack.call(this, track);
+  };
 })();
 `;

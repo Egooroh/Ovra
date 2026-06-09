@@ -29,6 +29,16 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
 
 let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || undefined;
 
+// Mini App short name registered in @BotFather (Bot Settings → Configure Mini App).
+// Launching via t.me/<bot>/<shortName>?startapp=<tenant> puts the tenant inside
+// Telegram's SIGNED initData (start_param), so the backend can trust it.
+const MINIAPP_SHORT_NAME = process.env.MINIAPP_SHORT_NAME || '';
+
+// Builds the secure deep-link that opens the Mini App bound to a workspace.
+function miniAppLink(botUsername: string, tenant: string): string {
+    return `https://t.me/${botUsername}/${MINIAPP_SHORT_NAME}?startapp=${encodeURIComponent(tenant)}`;
+}
+
 const recentMessages = new Map<number, string>();
 // Храним задачу вместе с воркспейсом и чатом-источником.
 interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: number; }
@@ -124,10 +134,12 @@ bot.command('start', async (ctx) => {
             const ws = await resolveTenant(ctx.chat.id);
             if (ws) {
                 const me = await ctx.telegram.getMe();
-                const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
+                const button = MINIAPP_SHORT_NAME
+                    ? Markup.button.url('🚀 Открыть приложение', miniAppLink(me.username!, ws.tenant_id))
+                    : Markup.button.url('🔗 Открыть бота', `https://t.me/${me.username}?start=${ws.tenant_id}`);
                 return ctx.reply(
-                    'Нажмите кнопку ниже, чтобы привязать свой YouGile-аккаунт:',
-                    Markup.inlineKeyboard([[Markup.button.url('🔗 Открыть бота', link)]])
+                    'Нажмите кнопку ниже, чтобы открыть Ovra и привязать свой YouGile-аккаунт:',
+                    Markup.inlineKeyboard([[button]])
                 );
             }
         } catch {}
@@ -722,6 +734,22 @@ bot.command('confirm', async (ctx) => {
     return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
 });
 
+// /app — открыть Mini App, привязанный к доске этого чата.
+bot.command('app', async (ctx) => {
+    if (!MINIAPP_SHORT_NAME) {
+        return ctx.reply('Mini App пока не настроен. Задайте MINIAPP_SHORT_NAME и зарегистрируйте приложение в @BotFather.');
+    }
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Откройте /app в групповом чате — приложение привяжется к доске этой группы.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+    const me = await ctx.telegram.getMe();
+    return ctx.reply('🚀 Ovra', Markup.inlineKeyboard([
+        [Markup.button.url('Открыть приложение', miniAppLink(me.username!, ws.tenant_id))],
+    ]));
+});
+
 bot.command('help', async (ctx) => {
     await ctx.reply(
         `🤖 *Ovra PM-bot*\n` +
@@ -754,13 +782,17 @@ bot.on('my_chat_member', async (ctx) => {
         const chat: any = upd.chat;
         const ws = await createWorkspace(chat.id, chat.title || 'Группа', upd.from?.id || '');
         const me = await ctx.telegram.getMe();
-        const link = `https://t.me/${me.username}?start=${ws.tenant_id}`;
         const adminNote = status === 'administrator' ? '' :
             '\n\n⚠️ Дайте мне права *администратора*, чтобы я видел сообщения и реакции.';
+        // Prefer the Mini App when its short name is configured; otherwise fall
+        // back to the legacy /start deep-link onboarding in the bot chat.
+        const button = MINIAPP_SHORT_NAME
+            ? Markup.button.url('🚀 Открыть приложение', miniAppLink(me.username!, ws.tenant_id))
+            : Markup.button.url('🔗 Открыть бота', `https://t.me/${me.username}?start=${ws.tenant_id}`);
         await ctx.telegram.sendMessage(chat.id,
             `👋 Привет! Я *Ovra* — превращаю поручения из чата в задачи YouGile.\n` +
             `Нажмите кнопку ниже, чтобы подключить доску и подвязаться:` + adminNote,
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.url('🔗 Открыть бота', link)]) }
+            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([button]) }
         );
     } catch (e) {
         console.error('my_chat_member onboarding:', e);

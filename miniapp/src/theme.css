@@ -1,0 +1,362 @@
+/* ============================================================================
+   Ovra Mini App — liquid glass design system
+   Brand: #3450CD. Aesthetic: frosted glass panels floating over an animated
+   aurora mesh, with specular edge highlights and soft depth shadows.
+   ========================================================================== */
+
+:root {
+  /* Brand ramp derived from #3450CD */
+  --brand: #3450cd;
+  --brand-50: #eef1fc;
+  --brand-200: #aeb9f0;
+  --brand-400: #5f78e0;
+  --brand-600: #2a40a8;
+  --brand-700: #1f2f7d;
+  --brand-glow: rgba(52, 80, 205, 0.55);
+
+  /* Surfaces */
+  --bg-0: #070b1c;
+  --bg-1: #0c1230;
+  --ink: #eef1fb;
+  --ink-dim: #aab2d4;
+  --ink-faint: #7b84ab;
+
+  /* Glass tokens */
+  --glass-bg: rgba(255, 255, 255, 0.07);
+  --glass-bg-strong: rgba(255, 255, 255, 0.12);
+  --glass-border: rgba(255, 255, 255, 0.16);
+  --glass-hi: rgba(255, 255, 255, 0.55);
+  --glass-shadow: 0 18px 50px -12px rgba(3, 6, 20, 0.7);
+  --blur: 22px;
+
+  --radius: 22px;
+  --radius-sm: 14px;
+  --gap: 14px;
+
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --bad: #fb7185;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    Roboto, "Helvetica Neue", system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg-0);
+  overflow-x: hidden;
+}
+
+/* --- Animated aurora mesh background ------------------------------------- */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background:
+    radial-gradient(60% 50% at 18% 8%, rgba(52, 80, 205, 0.55), transparent 60%),
+    radial-gradient(50% 45% at 92% 18%, rgba(95, 120, 224, 0.45), transparent 60%),
+    radial-gradient(70% 60% at 50% 110%, rgba(31, 47, 125, 0.6), transparent 60%),
+    linear-gradient(160deg, var(--bg-1), var(--bg-0));
+}
+.aurora::before,
+.aurora::after {
+  content: "";
+  position: absolute;
+  width: 70vmax;
+  height: 70vmax;
+  border-radius: 50%;
+  filter: blur(60px);
+  opacity: 0.5;
+  mix-blend-mode: screen;
+  animation: drift 22s ease-in-out infinite alternate;
+}
+.aurora::before {
+  background: radial-gradient(circle, var(--brand-glow), transparent 65%);
+  top: -20vmax;
+  left: -10vmax;
+}
+.aurora::after {
+  background: radial-gradient(circle, rgba(95, 120, 224, 0.5), transparent 65%);
+  bottom: -25vmax;
+  right: -15vmax;
+  animation-delay: -8s;
+}
+@keyframes drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(6vmax, 4vmax, 0) scale(1.15); }
+}
+
+/* --- App shell ----------------------------------------------------------- */
+.app {
+  min-height: 100%;
+  padding: calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 96px);
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+/* --- Glass primitive ----------------------------------------------------- */
+.glass {
+  position: relative;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(160%);
+  backdrop-filter: blur(var(--blur)) saturate(160%);
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+}
+/* specular top highlight */
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    150deg,
+    var(--glass-hi),
+    transparent 35%,
+    transparent 70%,
+    rgba(255, 255, 255, 0.12)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+.glass-pad {
+  padding: 18px;
+}
+
+/* --- Typography ---------------------------------------------------------- */
+.h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.h2 {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.muted { color: var(--ink-dim); }
+.faint { color: var(--ink-faint); font-size: 13px; }
+.center { text-align: center; }
+
+/* --- Brand mark ---------------------------------------------------------- */
+.brandmark {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 30px;
+  color: #fff;
+  background: linear-gradient(150deg, var(--brand-400), var(--brand-600));
+  box-shadow: 0 10px 30px -6px var(--brand-glow), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+.btn {
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 15px 18px;
+  font-size: 16px;
+  font-weight: 650;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: transform 0.12s ease, filter 0.2s ease, opacity 0.2s ease;
+  width: 100%;
+}
+.btn:active { transform: scale(0.975); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn-primary {
+  background: linear-gradient(150deg, var(--brand-400), var(--brand));
+  box-shadow: 0 12px 28px -10px var(--brand-glow), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.btn-ghost {
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+/* --- Inputs -------------------------------------------------------------- */
+.field {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 15px 16px;
+  color: var(--ink);
+  font-size: 16px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.field::placeholder { color: var(--ink-faint); }
+.field:focus {
+  border-color: var(--brand-400);
+  box-shadow: 0 0 0 4px rgba(95, 120, 224, 0.18);
+}
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  margin-bottom: 8px;
+  display: block;
+}
+
+/* --- Stepper / progress -------------------------------------------------- */
+.steps {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.step-dot {
+  height: 6px;
+  flex: 1;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.step-dot.done { background: var(--brand-400); }
+.step-dot.active::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 45%;
+  border-radius: inherit;
+  background: var(--brand-400);
+  animation: fill 1.4s ease-in-out infinite alternate;
+}
+@keyframes fill { from { width: 20%; } to { width: 85%; } }
+
+/* --- Selectable rows ----------------------------------------------------- */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.1s ease;
+}
+.row:active { transform: scale(0.99); }
+.row.selected {
+  border-color: var(--brand-400);
+  background: rgba(95, 120, 224, 0.16);
+}
+.row .avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(150deg, var(--brand-400), var(--brand-600));
+  flex: none;
+}
+.row .grow { flex: 1; min-width: 0; }
+.row .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- Tab bar ------------------------------------------------------------- */
+.tabbar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--safe-bottom) + 14px);
+  width: min(92%, 520px);
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  z-index: 10;
+}
+.tab {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  padding: 10px 4px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: color 0.2s ease, background 0.2s ease;
+}
+.tab svg { width: 22px; height: 22px; }
+.tab.active {
+  color: #fff;
+  background: linear-gradient(150deg, rgba(95, 120, 224, 0.5), rgba(52, 80, 205, 0.35));
+}
+
+/* --- Badges & pills ------------------------------------------------------ */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 99px;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  color: var(--ink-dim);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dot.todo { background: var(--brand-400); }
+.dot.in_progress { background: var(--warn); }
+.dot.review { background: #a78bfa; }
+.dot.done { background: var(--ok); }
+
+/* --- Misc ---------------------------------------------------------------- */
+.stack { display: flex; flex-direction: column; gap: var(--gap); }
+.stack-sm { display: flex; flex-direction: column; gap: 8px; }
+.spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.spin {
+  width: 22px; height: 22px;
+  border: 2.5px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.fade-in { animation: fade 0.35s ease both; }
+@keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora::before, .aurora::after, .step-dot.active::after, .fade-in { animation: none; }
+}

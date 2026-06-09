@@ -16,6 +16,7 @@ import { config } from "../util/config";
 import { log } from "../util/log";
 import { CallContext, ParentToWorker, WorkerToParent } from "../types";
 import { createApiServer } from "../api";
+import { writeSummary } from "../worker/summaryWriter";
 
 // In dev (ts-node) __filename ends with .ts; in prod it ends with .js.
 const IS_DEV = __filename.endsWith(".ts");
@@ -103,8 +104,15 @@ export class Orchestrator {
       if (c.attempts >= config.orchestrator.maxAttempts) {
         await prisma.call.update({
           where: { id: c.id },
-          data: { status: "FAILED", lastError: "max attempts exceeded" },
+          data: { status: "FAILED", lastError: "max attempts exceeded", endedAt: new Date() },
         });
+        // Still generate a summary if audio was captured — the transcript may be
+        // partial but better than nothing.
+        const hasTranscript = await prisma.transcript.findUnique({ where: { callId: c.id }, select: { id: true } });
+        if (hasTranscript) {
+          writeSummary(prisma, c.id, c.organizationId, c.title, c.startsAt, new Date())
+            .catch((err) => log.warn({ callId: c.id, err: String(err) }, "orchestrator.summary_on_fail_error"));
+        }
         continue;
       }
 

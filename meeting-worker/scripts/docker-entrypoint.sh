@@ -2,7 +2,7 @@
 set -e
 
 # Clean up stale locks from previous container runs
-rm -f /tmp/.X99-lock /tmp/pulse-* /var/run/pulse/
+rm -rf /tmp/.X99-lock /tmp/pulse-* /var/run/pulse/
 
 # Start virtual display
 Xvfb :99 -screen 0 1280x720x24 -ac &

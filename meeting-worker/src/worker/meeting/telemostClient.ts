@@ -96,6 +96,12 @@ export class TelemostClient implements MeetingClient {
       "--disable-dev-shm-usage",
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
+      // Prevent headless Chromium from throttling canvas rendering / JS timers
+      // for "background" windows — critical for captureStream() to produce frames.
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
+      "--disable-features=CalculateNativeWinOcclusion",
     ];
 
     if (isLinux) {

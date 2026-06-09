@@ -78,6 +78,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/calendar/accounts", s.handleCreateCalendarAccount)
 	mux.HandleFunc("DELETE /v1/workspaces/{tenant}/calendar/accounts/{id}", s.handleDeleteCalendarAccount)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
+	// Telegram Mini App: authenticated /app/api/* + static SPA under /app/.
+	s.registerAppRoutes(mux)
+
 	// Outermost first: recover panics, then log every request.
 	return s.recoverPanic(s.requestLogger(mux))
 }

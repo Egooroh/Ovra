@@ -46,6 +46,13 @@ type Config struct {
 	// per-task user confirmation instead of being auto-created in YouGile.
 	// Empty → tasks are created automatically (legacy behaviour).
 	BotInternalURL string
+	// BotToken is the Telegram bot token. It is the HMAC key used to verify the
+	// signed initData every Mini App request carries. Empty → the Mini App API
+	// (/app/*) is disabled and returns 503.
+	BotToken string
+	// MiniAppDir is the directory of the built Mini App static bundle (Vite
+	// `dist`). When set, the server serves it under /app/ with SPA fallback.
+	MiniAppDir string
 	// Workspaces is the tenant catalogue loaded from workspace.yaml.
 	Workspaces []domain.Workspace
 }
@@ -70,6 +77,8 @@ func Load() (*Config, error) {
 		WorkerSecret:     os.Getenv("WORKER_SECRET"),
 		MeetingWorkerURL: os.Getenv("MEETING_WORKER_URL"),
 		BotInternalURL:   os.Getenv("BOT_INTERNAL_URL"),
+		BotToken:         os.Getenv("TELEGRAM_BOT_TOKEN"),
+		MiniAppDir:       env("MINIAPP_DIR", "miniapp/dist"),
 	}
 
 	wsPath := env("WORKSPACE_CONFIG", "workspace.yaml")

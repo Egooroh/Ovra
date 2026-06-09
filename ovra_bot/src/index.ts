@@ -13,6 +13,7 @@ bot.telegram.setMyCommands([
     { command: "board", description: "Все задачи по статусам (канбан-доска)" },
     { command: "trash", description: "Задачи в корзине (удалятся через 24 ч)" },
     { command: "sync", description: "Синхронизировать задачи с YouGile" },
+    { command: "app", description: "Открыть приложение Ovra (Mini App)" },
     { command: "stats", description: "Статус системы" },
     { command: "help", description: "Как пользоваться ботом" },
 ]).catch(() => { /* не критично */ });
