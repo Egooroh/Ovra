@@ -7,6 +7,7 @@ import {
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
+    deleteTask, getDigest, getTrash, clearTrash, syncWorkspace,
     type YougileMember, type YougileProject, type CalendarAccount
 } from "./services/backend.js";
 import crypto from "crypto";
@@ -42,6 +43,10 @@ const confirmTarget = new Map<string, 'pm' | 'group'>(); // tenant_id → overri
 const awaitingKey = new Map<number, string>();                              // юзер → tenant: ждём API-ключ от админа
 const linkSessions = new Map<number, { tenant: string; members: YougileMember[] }>(); // юзер → выбор себя из YouGile
 const projectSessions = new Map<number, { tenant: string; projects: YougileProject[] }>(); // юзер → выбор проекта
+
+// taskIdByMessage хранит backend task_id для кнопки «Удалить» после одобрения.
+// ключ — messageId сообщения «Задача создана», значение — task id из бэкенда.
+const taskIdByMessage = new Map<number, string>();
 
 // Задачи из созвона, ожидающие подтверждения в групповом чате.
 interface PendingMeetingTask {
@@ -463,7 +468,7 @@ bot.command('stats', async (ctx) => {
     );
 });
 
-bot.on("text", async (ctx) => {
+bot.on("text", async (ctx, next) => {
     const message = ctx.message;
 
     // Личка: ждём ли мы API-ключ от админа (онбординг доски)?
@@ -472,7 +477,7 @@ bot.on("text", async (ctx) => {
         if (tenant) {
             awaitingKey.delete(ctx.from.id);
             try {
-                await saveYougileCreds(tenant, message.text.trim());
+                await saveYougileCreds(tenant, { api_key: message.text.trim() });
                 const projects = await listYougileProjects(tenant);
                 if (projects.length === 0) {
                     await ctx.reply('🔑 Ключ принят, но в YouGile нет проектов. Создайте проект и нажмите /start ещё раз.');
@@ -513,6 +518,9 @@ bot.on("text", async (ctx) => {
 
         return; // прочие личные сообщения не разбираем как задачи
     }
+
+    // Команды в группе обрабатываются отдельными bot.command() хендлерами.
+    if (message.text.startsWith('/')) return next();
 
     // Группа: кэшируем.
     recentMessages.set(message.message_id, message.text);
@@ -602,15 +610,28 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
         return; // pending НЕ удаляем — нужен для кнопки «Да, добавить»
     }
 
-    // Успех.
-    await ctx.editMessageText(
+    // Успех — показываем кнопку «Удалить» если знаем backend task id.
+    const successText =
         `✅ *Задача создана в YouGile*\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
         `📌 *${title}*\n` +
         `👤 ${assignee || '—'}\n` +
-        `🔗 ID: \`${result.yougile_task_id || 'неизвестно'}\``,
-        { parse_mode: 'Markdown' }
-    );
+        `🔗 ID: \`${result.yougile_task_id || 'неизвестно'}\``;
+
+    const backendId: string | undefined = (result as any).id;
+    if (backendId) {
+        const sent = await ctx.editMessageText(successText, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback('🗑️ Удалить', `del_task_${backendId}`)
+            ])
+        });
+        if (typeof sent === 'object' && sent && 'message_id' in sent) {
+            taskIdByMessage.set(sent.message_id, backendId);
+        }
+    } else {
+        await ctx.editMessageText(successText, { parse_mode: 'Markdown' });
+    }
 
     // Уведомляем исходный чат (группу), что задача поставлена.
     if (pending.originChatId && pending.originChatId !== ctx.chat?.id) {
@@ -704,6 +725,7 @@ bot.command('help', async (ctx) => {
         `/confirm group — подтверждения в группу\n` +
         `/confirm pm — подтверждения в личку ПМа\n` +
         `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
+        `/digest — дайджест открытых задач по исполнителям\n` +
         `/stats — статус системы\n` +
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
@@ -776,11 +798,21 @@ bot.action(/^link_(\d+)$/, async (ctx) => {
     const m = sess.members[idx];
     try {
         await ctx.answerCbQuery('Сохраняю…');
+        // Получаем воркспейс чтобы проверить, является ли регистрирующийся хостом.
+        let role = 'member';
+        try {
+            const wsInfo = await getWorkspaceInfo(sess.tenant);
+            if (wsInfo.host_tg_id && wsInfo.host_tg_id === String(userId)) {
+                role = 'admin';
+            }
+        } catch { /* нет данных о роли — ставим member */ }
+
         await registerUser(sess.tenant, {
             tg_id: String(userId),
             tg_username: ctx.from!.username ? `@${ctx.from!.username}` : '',
             full_name: [ctx.from!.first_name, ctx.from!.last_name].filter(Boolean).join(' ') || (ctx.from!.username || ''),
             yougile_user_id: m.id,
+            role,
         });
         linkSessions.delete(userId);
         await ctx.editMessageText(`✅ Готово! Вы привязаны к *${m.name || m.email}*.\nТеперь задачи из чата смогут назначаться на вас.`, { parse_mode: 'Markdown' });
@@ -963,5 +995,228 @@ bot.action(/^mtask_no_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.editMessageText('🗑️ Задача из созвона пропущена.');
 });
+
+// Удаление задачи через кнопку после одобрения (мягкое удаление, 24 ч корзина).
+bot.action(/^del_task_(.+)$/, async (ctx) => {
+    const taskId = ctx.match[1]!;
+    try {
+        await ctx.answerCbQuery('Удаляю…');
+        await deleteTask(taskId);
+        await ctx.editMessageText('🗑️ Задача перемещена в корзину (удалится через 24 ч).');
+    } catch (e) {
+        console.error('del_task:', e);
+        await ctx.answerCbQuery('❌ Не удалось удалить.');
+    }
+});
+
+// /digest — прислать дайджест открытых задач по исполнителям.
+bot.command('digest', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) {
+        return ctx.reply('⚠️ Этот чат не привязан к доске.');
+    }
+
+    const loading = await ctx.reply('⏳ Собираю дайджест…');
+
+    try {
+        const data = await getDigest(ws.tenant_id);
+        const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
+            + (data.unassigned?.length ?? 0);
+
+        if (total === 0) {
+            await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+                '✅ Открытых задач нет — всё чисто!');
+            return;
+        }
+
+        const lines: string[] = [`📋 *Дайджест задач*\n━━━━━━━━━━━━━━━━━━`];
+
+        for (const assignee of data.assignees) {
+            const who = assignee.tg_username
+                ? `*${assignee.full_name}* (${assignee.tg_username})`
+                : `*${assignee.full_name}*`;
+            lines.push(`\n👤 ${who}`);
+            for (const t of assignee.tasks) {
+                const dl = t.deadline
+                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                const status = statusEmoji(t.status);
+                lines.push(`  ${status} ${t.title}${dl}`);
+            }
+        }
+
+        if (data.unassigned?.length) {
+            lines.push(`\n❓ *Без исполнителя*`);
+            for (const t of data.unassigned) {
+                const dl = t.deadline
+                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                    : '';
+                lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+            }
+        }
+
+        lines.push(`\n━━━━━━━━━━━━━━━━━━\n_Всего открытых: ${total}_`);
+
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('digest:', e);
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            '❌ Не удалось получить дайджест. Проверьте логи.');
+    }
+});
+
+// Формирует текст и кнопки для сообщения корзины.
+function buildTrashMessage(tasks: any[], tenantId: string): { text: string; keyboard: any } {
+    const lines: string[] = [
+        `🗑 *Корзина* — ${tasks.length} ${pluralTasks(tasks.length)}`,
+        `_Задачи автоматически удалятся через 24 ч после попадания в корзину_`,
+        `━━━━━━━━━━━━━━━━━━`,
+    ];
+    for (const t of tasks) {
+        const when = t.deleted_at
+            ? new Date(t.deleted_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : '?';
+        lines.push(`  • ${t.title}\n    _удалено ${when}_`);
+    }
+    const keyboard = Markup.inlineKeyboard([
+        Markup.button.callback(`🗑 Очистить корзину (${tasks.length})`, `trash_clear_${tenantId}`)
+    ]);
+    return { text: lines.join('\n'), keyboard };
+}
+
+function pluralTasks(n: number): string {
+    if (n % 10 === 1 && n % 100 !== 11) return 'задача';
+    if ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) return 'задачи';
+    return 'задач';
+}
+
+// /trash — показать задачи в корзине.
+bot.command('trash', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('⏳ Загружаю корзину…');
+    try {
+        const tasks = await getTrash(ws.tenant_id);
+        if (tasks.length === 0) {
+            await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+                '🗑 Корзина пуста — удалять нечего.');
+            return;
+        }
+        const { text, keyboard } = buildTrashMessage(tasks, ws.tenant_id);
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        console.error('trash:', e);
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            '❌ Не удалось загрузить корзину.');
+    }
+});
+
+// Нажатие «Очистить корзину» → показываем подтверждение.
+bot.action(/^trash_clear_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const tenantId = ctx.match[1]!;
+    const tasks = await getTrash(tenantId).catch(() => [] as any[]);
+    if (tasks.length === 0) {
+        await ctx.editMessageText('🗑 Корзина уже пуста.');
+        return;
+    }
+    await ctx.editMessageText(
+        `⚠️ *Подтвердите очистку*\n\nБудет удалено *${tasks.length} ${pluralTasks(tasks.length)}* без возможности восстановления:\n\n` +
+        tasks.map((t: any) => `  • ${t.title}`).join('\n'),
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Да, удалить всё', `trash_confirm_${tenantId}`)],
+                [Markup.button.callback('❌ Отмена', `trash_cancel_${tenantId}`)],
+            ])
+        }
+    );
+});
+
+// Подтверждение очистки.
+bot.action(/^trash_confirm_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery('Очищаю…');
+    const tenantId = ctx.match[1]!;
+    try {
+        const deleted = await clearTrash(tenantId);
+        await ctx.editMessageText(
+            `✅ *Корзина очищена*\n\nУдалено задач: *${deleted}*`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (e) {
+        console.error('trash_confirm:', e);
+        await ctx.editMessageText('❌ Не удалось очистить корзину. Попробуйте ещё раз.');
+    }
+});
+
+// Отмена очистки → возвращаем список.
+bot.action(/^trash_cancel_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery('Отменено');
+    const tenantId = ctx.match[1]!;
+    try {
+        const tasks = await getTrash(tenantId);
+        if (tasks.length === 0) {
+            await ctx.editMessageText('🗑 Корзина пуста.');
+            return;
+        }
+        const { text, keyboard } = buildTrashMessage(tasks, tenantId);
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+    } catch (e) {
+        await ctx.editMessageText('🗑 Корзина.');
+    }
+});
+
+// /sync — синхронизировать задачи Ovra с YouGile (пересоздать удалённые карточки).
+bot.command('sync', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const loading = await ctx.reply('🔄 Синхронизирую с YouGile…');
+    try {
+        const r = await syncWorkspace(ws.tenant_id);
+        const lines = [
+            `🔄 *Синхронизация завершена*`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `🔍 Проверено задач: *${r.checked}*`,
+            `🗑 Удалено из Ovra (нет в YouGile): *${r.deleted}*`,
+            `↗️ Перемещено в нужную колонку: *${r.moved}*`,
+            `⏭ Уже синхронизированы: *${r.already_synced}*`,
+        ];
+        if (r.skipped > 0) lines.push(`📦 Завершённых пропущено: *${r.skipped}*`);
+        if (r.errors.length > 0) {
+            lines.push(`\n❌ *Ошибки (${r.errors.length}):*`);
+            r.errors.slice(0, 5).forEach(e => lines.push(`  • ${e}`));
+            if (r.errors.length > 5) lines.push(`  _…и ещё ${r.errors.length - 5}_`);
+        }
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('sync:', e);
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            '❌ Ошибка синхронизации. Проверьте что YouGile подключён (/stats).');
+    }
+});
+
+function statusEmoji(status: string): string {
+    switch (status) {
+        case 'todo':        return '🔵';
+        case 'in_progress': return '🟡';
+        case 'review':      return '🟣';
+        case 'done':        return '✅';
+        default:            return '•';
+    }
+}
 
 export { bot };

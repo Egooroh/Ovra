@@ -24,8 +24,11 @@ type workspaceResponse struct {
 	ChatID           string `json:"chat_id"`
 	Name             string `json:"name"`
 	YougileProjectID string `json:"yougile_project_id"`
+	HostTgID         string `json:"host_tg_id"`
 	Connected        bool   `json:"connected"`      // YouGile credentials set
 	BoardResolved    bool   `json:"board_resolved"` // all four columns mapped
+	DigestEnabled    bool   `json:"digest_enabled"`
+	DigestTime       string `json:"digest_time"`
 }
 
 // handleCreateWorkspace creates (or returns) the workspace bound to a chat.
@@ -180,13 +183,20 @@ func (s *Server) workspaceResp(ctx context.Context, ws domain.Workspace) workspa
 	if _, enc, err := s.repo.GetYougileTokenEnc(ctx, ws.ID); err == nil && len(enc) > 0 {
 		connected = true
 	}
+	digestTime := ws.DigestTime
+	if digestTime == "" {
+		digestTime = "09:00"
+	}
 	return workspaceResponse{
 		TenantID:         ws.ID,
 		ChatID:           ws.ChatID,
 		Name:             ws.Name,
 		YougileProjectID: ws.YougileProjectID,
+		HostTgID:         ws.HostTgID,
 		Connected:        connected,
 		BoardResolved:    ws.Columns.Todo != "" && ws.Columns.Done != "",
+		DigestEnabled:    ws.DigestEnabled,
+		DigestTime:       digestTime,
 	}
 }
 

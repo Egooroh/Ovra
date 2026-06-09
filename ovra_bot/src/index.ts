@@ -9,6 +9,9 @@ bot.telegram.setMyCommands([
     { command: "start", description: "Назначить эту личку для подтверждений (ПМ)" },
     { command: "confirm", description: "Куда слать подтверждения: group или pm" },
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
+    { command: "digest", description: "Дайджест открытых задач по исполнителям" },
+    { command: "trash", description: "Задачи в корзине (удалятся через 24 ч)" },
+    { command: "sync", description: "Синхронизировать задачи с YouGile" },
     { command: "stats", description: "Статус системы" },
     { command: "help", description: "Как пользоваться ботом" },
 ]).catch(() => { /* не критично */ });

@@ -13,11 +13,13 @@ import (
 // registerUserRequest registers a chat member. The bot calls this when it sees
 // a person in the chat; yougile_user_id is optional — the backend tries to
 // auto-map it by matching full_name against YouGile members.
+// role is "admin" or "member" (default "member").
 type registerUserRequest struct {
 	TgID          string `json:"tg_id"`
 	TgUsername    string `json:"tg_username"`
 	FullName      string `json:"full_name"`
 	YougileUserID string `json:"yougile_user_id"`
+	Role          string `json:"role"` // "admin" | "member"; defaults to "member"
 }
 
 // userResponse is the JSON view of a registered user.
@@ -28,6 +30,7 @@ type userResponse struct {
 	TgUsername    string `json:"tg_username"`
 	FullName      string `json:"full_name"`
 	YougileUserID string `json:"yougile_user_id"`
+	Role          string `json:"role"`
 }
 
 // handleRegisterUser upserts a workspace member (keyed by tenant + tg_id).
@@ -60,12 +63,18 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		yougileID = s.autoMapYouGileUser(r.Context(), tenant, req.FullName)
 	}
 
+	role := req.Role
+	if role != domain.RoleAdmin && role != domain.RoleMember {
+		role = domain.RoleMember
+	}
+
 	u, err := s.repo.UpsertUser(r.Context(), domain.User{
 		TenantID:      tenant,
 		TgID:          req.TgID,
 		TgUsername:    req.TgUsername,
 		FullName:      req.FullName,
 		YougileUserID: yougileID,
+		Role:          role,
 	})
 	if err != nil {
 		s.log.Error("upsert user", "tenant", tenant, "err", err)
@@ -134,5 +143,6 @@ func toUserResponse(u domain.User) userResponse {
 		TgUsername:    u.TgUsername,
 		FullName:      u.FullName,
 		YougileUserID: u.YougileUserID,
+		Role:          u.Role,
 	}
 }

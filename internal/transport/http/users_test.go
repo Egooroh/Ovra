@@ -9,6 +9,7 @@ import (
 
 	"ovra/internal/domain"
 	"ovra/internal/secret"
+	_ "ovra/internal/storage" // ErrNotFound used via fakeRepo
 )
 
 func TestRegisterUserExplicitYouGileID(t *testing.T) {
@@ -64,6 +65,55 @@ func TestRegisterUserUnknownWorkspace(t *testing.T) {
 	rec := post(t, h, "/v1/workspaces/ghost/users", `{"tg_id":"1","full_name":"X"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestRegisterUserAdminRole(t *testing.T) {
+	repo := newFakeRepo("ws-1")
+	h := testServer(t, repo, "http://unused")
+
+	rec := post(t, h, "/v1/workspaces/ws-1/users",
+		`{"tg_id":"1","full_name":"Иван","role":"admin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if repo.upserted.Role != domain.RoleAdmin {
+		t.Fatalf("role = %q, want admin", repo.upserted.Role)
+	}
+	var resp userResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Role != domain.RoleAdmin {
+		t.Fatalf("resp.role = %q, want admin", resp.Role)
+	}
+}
+
+func TestRegisterUserDefaultRole(t *testing.T) {
+	repo := newFakeRepo("ws-1")
+	h := testServer(t, repo, "http://unused")
+
+	rec := post(t, h, "/v1/workspaces/ws-1/users",
+		`{"tg_id":"2","full_name":"Пётр"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if repo.upserted.Role != domain.RoleMember {
+		t.Fatalf("role = %q, want member", repo.upserted.Role)
+	}
+}
+
+func TestRegisterUserInvalidRoleDefaultsToMember(t *testing.T) {
+	repo := newFakeRepo("ws-1")
+	h := testServer(t, repo, "http://unused")
+
+	rec := post(t, h, "/v1/workspaces/ws-1/users",
+		`{"tg_id":"3","full_name":"Анна","role":"superuser"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if repo.upserted.Role != domain.RoleMember {
+		t.Fatalf("invalid role should default to member, got %q", repo.upserted.Role)
 	}
 }
 

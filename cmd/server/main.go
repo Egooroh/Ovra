@@ -123,6 +123,44 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Background job: purge tasks that have been in the trash for > 24 h.
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n, err := repo.DeleteExpiredTasks(context.Background())
+				if err != nil {
+					log.Error("trash cleanup", "err", err)
+				} else if n > 0 {
+					log.Info("trash cleanup", "deleted", n)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Background job: auto-sync YouGile→Ovra every 5 minutes.
+	// Tasks deleted in YouGile are soft-deleted in Ovra automatically.
+	if cipher != nil {
+		autoSyncer := service.NewAutoSyncer(repo, yg, cipher, log)
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					autoSyncer.SyncAll(context.Background())
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		log.Info("auto-sync enabled (5 min interval)")
+	}
+
 	go func() {
 		log.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

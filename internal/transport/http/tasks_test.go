@@ -17,6 +17,15 @@ import (
 	"ovra/internal/storage"
 )
 
+// del issues a DELETE request.
+func del(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("DELETE", path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 // fakePublisher is a stand-in for *service.Tasks.
 type fakePublisher struct {
 	in         service.TaskInput
@@ -217,5 +226,60 @@ func TestListTasks(t *testing.T) {
 	}
 	if len(body.Tasks) != 2 || body.Tasks[0].ID != "t1" {
 		t.Fatalf("tasks = %+v", body.Tasks)
+	}
+}
+
+// --- soft-delete ---
+
+func repoServer(t *testing.T, repo *fakeRepo) http.Handler {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewServer(&config.Config{}, repo, nil, nil, nil, nil, log).Routes()
+}
+
+func TestDeleteTaskSuccess(t *testing.T) {
+	now := time.Now()
+	repo := newFakeRepo("ws-1")
+	repo.softDeletedTask = domain.Task{
+		ID: "t1", TenantID: "ws-1", Title: "Задача",
+		Status: domain.StatusTodo, ApprovalStatus: domain.ApprovalApproved,
+		DeletedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	h := repoServer(t, repo)
+
+	rec := del(t, h, "/v1/tasks/t1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp taskResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ID != "t1" {
+		t.Fatalf("resp.ID = %q, want t1", resp.ID)
+	}
+	if resp.DeletedAt == nil {
+		t.Fatal("deleted_at must be present in response")
+	}
+}
+
+func TestDeleteTaskNotFound(t *testing.T) {
+	repo := newFakeRepo("ws-1")
+	repo.softDeleteErr = storage.ErrNotFound
+	h := repoServer(t, repo)
+
+	rec := del(t, h, "/v1/tasks/ghost")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestDeleteTaskStorageUnavailable(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewServer(&config.Config{}, nil, nil, nil, nil, nil, log).Routes()
+
+	rec := del(t, h, "/v1/tasks/t1")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }

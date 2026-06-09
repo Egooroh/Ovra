@@ -47,8 +47,9 @@ func (p *Postgres) UpsertWorkspace(ctx context.Context, ws domain.Workspace) err
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO workspaces
 			(id, chat_id, name, yougile_project_id,
-			 col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE(NULLIF($10,''),'Europe/Moscow'))
+			 col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
+			 digest_enabled, digest_time)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE(NULLIF($10,''),'Europe/Moscow'),$11,COALESCE(NULLIF($12,''),'09:00'))
 		ON CONFLICT (id) DO UPDATE SET
 			chat_id            = EXCLUDED.chat_id,
 			name               = EXCLUDED.name,
@@ -61,7 +62,7 @@ func (p *Postgres) UpsertWorkspace(ctx context.Context, ws domain.Workspace) err
 			timezone           = EXCLUDED.timezone`,
 		ws.ID, ws.ChatID, ws.Name, ws.YougileProjectID,
 		ws.Columns.Todo, ws.Columns.InProgress, ws.Columns.Review, ws.Columns.Done,
-		ws.HostTgID, ws.Timezone)
+		ws.HostTgID, ws.Timezone, ws.DigestEnabled, ws.DigestTime)
 	if err != nil {
 		return fmt.Errorf("upsert workspace: %w", err)
 	}
@@ -72,11 +73,12 @@ func (p *Postgres) GetWorkspace(ctx context.Context, id string) (domain.Workspac
 	var ws domain.Workspace
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
-		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone
+		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
+		       digest_enabled, digest_time
 		FROM workspaces WHERE id = $1`, id).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -91,11 +93,12 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 	var ws domain.Workspace
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
-		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone
+		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
+		       digest_enabled, digest_time
 		FROM workspaces WHERE chat_id = $1 LIMIT 1`, chatID).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -103,6 +106,46 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 		return domain.Workspace{}, fmt.Errorf("get workspace by chat: %w", err)
 	}
 	return ws, nil
+}
+
+// ListWorkspaces returns all workspaces that have YouGile credentials configured
+// (yougile_api_token_enc IS NOT NULL) — used by the auto-sync background job.
+func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT id, chat_id, name, yougile_project_id,
+		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
+		       digest_enabled, digest_time
+		FROM workspaces
+		WHERE yougile_api_token_enc IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("list workspaces: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Workspace
+	for rows.Next() {
+		var ws domain.Workspace
+		if err := rows.Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
+			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime); err != nil {
+			return nil, fmt.Errorf("scan workspace: %w", err)
+		}
+		out = append(out, ws)
+	}
+	return out, rows.Err()
+}
+
+// SetDigestSettings updates the digest enabled flag and schedule time for a workspace.
+func (p *Postgres) SetDigestSettings(ctx context.Context, tenantID string, enabled bool, digestTime string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE workspaces SET digest_enabled = $2, digest_time = $3 WHERE id = $1`,
+		tenantID, enabled, digestTime)
+	if err != nil {
+		return fmt.Errorf("set digest settings: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetYougileCredentials stores the workspace login and the encrypted API token.
@@ -170,25 +213,31 @@ func (p *Postgres) SetWorkspaceProject(ctx context.Context, tenantID, projectID 
 // --- users ---
 
 func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, error) {
+	role := u.Role
+	if role == "" {
+		role = domain.RoleMember
+	}
 	err := p.pool.QueryRow(ctx, `
-		INSERT INTO users (tenant_id, tg_id, tg_username, full_name, yougile_user_id)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO users (tenant_id, tg_id, tg_username, full_name, yougile_user_id, role)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (tenant_id, tg_id) DO UPDATE SET
 			tg_username     = EXCLUDED.tg_username,
 			full_name       = EXCLUDED.full_name,
-			yougile_user_id = EXCLUDED.yougile_user_id
+			yougile_user_id = EXCLUDED.yougile_user_id,
+			role            = EXCLUDED.role
 		RETURNING id`,
-		u.TenantID, u.TgID, u.TgUsername, u.FullName, u.YougileUserID).
+		u.TenantID, u.TgID, u.TgUsername, u.FullName, u.YougileUserID, role).
 		Scan(&u.ID)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("upsert user: %w", err)
 	}
+	u.Role = role
 	return u, nil
 }
 
 func (p *Postgres) GetUser(ctx context.Context, id string) (domain.User, error) {
 	u, err := scanUser(p.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
 		FROM users WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.User{}, ErrNotFound
@@ -201,7 +250,7 @@ func (p *Postgres) GetUser(ctx context.Context, id string) (domain.User, error) 
 
 func (p *Postgres) ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
 		FROM users WHERE tenant_id = $1 ORDER BY full_name`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -284,7 +333,7 @@ func (p *Postgres) UpdateTask(ctx context.Context, t domain.Task) (domain.Task, 
 
 func (p *Postgres) ListTasksByTenant(ctx context.Context, tenantID string) ([]domain.Task, error) {
 	rows, err := p.pool.Query(ctx, taskSelect+`
-		WHERE tenant_id = $1 ORDER BY created_at DESC`, tenantID)
+		WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
@@ -308,6 +357,7 @@ func (p *Postgres) FindSimilarOpenTasks(ctx context.Context, tenantID, title str
 		WHERE tenant_id = $1
 		  AND status <> 'done'
 		  AND approval_status <> 'rejected'
+		  AND deleted_at IS NULL
 		  AND (lower(title) = lower($2) OR similarity(title, $2) >= $3)
 		ORDER BY similarity(title, $2) DESC
 		LIMIT 5`, tenantID, title, threshold)
@@ -333,7 +383,10 @@ func (p *Postgres) ListOpenTasks(ctx context.Context, tenantID string, limit int
 		limit = 50
 	}
 	rows, err := p.pool.Query(ctx, taskSelect+`
-		WHERE tenant_id = $1 AND status <> 'done' AND approval_status <> 'rejected'
+		WHERE tenant_id = $1
+		  AND status <> 'done'
+		  AND approval_status <> 'rejected'
+		  AND deleted_at IS NULL
 		ORDER BY created_at DESC LIMIT $2`, tenantID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list open tasks: %w", err)
@@ -351,6 +404,97 @@ func (p *Postgres) ListOpenTasks(ctx context.Context, tenantID string, limit int
 	return out, rows.Err()
 }
 
+// ListDigestTasks returns approved, non-done, non-deleted tasks of the tenant
+// ordered by deadline asc (nulls last) then created_at asc.
+func (p *Postgres) ListDigestTasks(ctx context.Context, tenantID string) ([]domain.Task, error) {
+	rows, err := p.pool.Query(ctx, taskSelect+`
+		WHERE tenant_id = $1
+		  AND approval_status = 'approved'
+		  AND status <> 'done'
+		  AND deleted_at IS NULL
+		ORDER BY deadline ASC NULLS LAST, created_at ASC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list digest tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan digest task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SoftDeleteTask moves a task to the trash (sets deleted_at = now()).
+// Returns ErrNotFound if the task does not exist or is already deleted.
+func (p *Postgres) SoftDeleteTask(ctx context.Context, id string) (domain.Task, error) {
+	t, err := scanTask(p.pool.QueryRow(ctx, taskSelect+`
+		WHERE id = $1 AND deleted_at IS NULL`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Task{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("soft delete task (fetch): %w", err)
+	}
+
+	now := time.Now()
+	_, err = p.pool.Exec(ctx,
+		`UPDATE tasks SET deleted_at = $2, updated_at = $2 WHERE id = $1`, id, now)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("soft delete task (update): %w", err)
+	}
+	t.DeletedAt = &now
+	t.UpdatedAt = now
+	return t, nil
+}
+
+// ListTrashTasks returns tasks in the trash (deleted_at IS NOT NULL) for the
+// given tenant, ordered by deleted_at descending (newest first).
+func (p *Postgres) ListTrashTasks(ctx context.Context, tenantID string) ([]domain.Task, error) {
+	rows, err := p.pool.Query(ctx, taskSelect+`
+		WHERE tenant_id = $1
+		  AND deleted_at IS NOT NULL
+		ORDER BY deleted_at DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list trash tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan trash task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ClearTrash immediately removes all trashed tasks for the given tenant.
+func (p *Postgres) ClearTrash(ctx context.Context, tenantID string) (int64, error) {
+	ct, err := p.pool.Exec(ctx,
+		`DELETE FROM tasks WHERE tenant_id = $1 AND deleted_at IS NOT NULL`, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("clear trash: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
+// DeleteExpiredTasks physically removes tasks that have been in the trash for
+// more than 24 h. Returns the number of rows deleted.
+func (p *Postgres) DeleteExpiredTasks(ctx context.Context) (int64, error) {
+	ct, err := p.pool.Exec(ctx,
+		`DELETE FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < now() - INTERVAL '24 hours'`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired tasks: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
 // --- helpers ---
 
 // row is satisfied by both *pgx.Row (QueryRow) and pgx.Rows (Query).
@@ -361,20 +505,20 @@ type row interface {
 const taskSelect = `
 	SELECT id, tenant_id, title, description, assignee_user_id, deadline,
 	       status, approval_status, yougile_task_id, meeting_id, source,
-	       created_at, updated_at
+	       created_at, updated_at, deleted_at
 	FROM tasks`
 
 func scanTask(r row) (domain.Task, error) {
 	var t domain.Task
 	err := r.Scan(&t.ID, &t.TenantID, &t.Title, &t.Description, &t.AssigneeUserID,
 		&t.Deadline, &t.Status, &t.ApprovalStatus, &t.YougileTaskID, &t.MeetingID,
-		&t.Source, &t.CreatedAt, &t.UpdatedAt)
+		&t.Source, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	return t, err
 }
 
 func scanUser(r row) (domain.User, error) {
 	var u domain.User
-	err := r.Scan(&u.ID, &u.TenantID, &u.TgID, &u.TgUsername, &u.FullName, &u.YougileUserID)
+	err := r.Scan(&u.ID, &u.TenantID, &u.TgID, &u.TgUsername, &u.FullName, &u.YougileUserID, &u.Role)
 	return u, err
 }
 
