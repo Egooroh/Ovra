@@ -145,7 +145,7 @@ func main() {
 	// Background job: auto-sync YouGile→Ovra every 5 minutes.
 	// Tasks deleted in YouGile are soft-deleted in Ovra automatically.
 	if cipher != nil {
-		autoSyncer := service.NewAutoSyncer(repo, yg, cipher, log)
+		autoSyncer := service.NewAutoSyncer(repo, yg, cipher, cfg.BotInternalURL, cfg.WorkerSecret, log)
 		go func() {
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
@@ -159,6 +159,43 @@ func main() {
 			}
 		}()
 		log.Info("auto-sync enabled (5 min interval)")
+	}
+
+	// Background job: daily task digest. Once a minute, check whether any
+	// workspace's configured digest time has arrived and, if so, ask the bot to
+	// post the digest. Requires the bot's internal URL.
+	if cfg.BotInternalURL != "" {
+		digest := service.NewDigestScheduler(repo, cfg.BotInternalURL, cfg.WorkerSecret, log)
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					digest.Tick(context.Background())
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		log.Info("digest scheduler enabled (1 min tick)")
+
+		// Background job: deadline reminders. Every 5 minutes, DM assignees about
+		// tasks due within 24 h (or overdue) that haven't been reminded yet.
+		reminder := service.NewReminderScheduler(repo, cfg.BotInternalURL, cfg.WorkerSecret, log)
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					reminder.Tick(context.Background())
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		log.Info("reminder scheduler enabled (5 min tick)")
 	}
 
 	go func() {

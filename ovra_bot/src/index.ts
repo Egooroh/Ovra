@@ -1,6 +1,6 @@
 // src/index.ts
 import http from 'http';
-import { bot, handleMeetingDone, type MeetingDonePayload } from "./bot.js";
+import { bot, handleMeetingDone, handleDigestDue, handleReminderDue, handleStatusChange, type MeetingDonePayload } from "./bot.js";
 
 // allowedUpdates — белый список типов апдейтов. message_reaction Telegram НЕ шлёт
 // по умолчанию, поэтому его нужно указать явно; message и callback_query тоже
@@ -9,8 +9,10 @@ bot.telegram.setMyCommands([
     { command: "start", description: "Назначить эту личку для подтверждений (ПМ)" },
     { command: "setup", description: "Открыть панель настройки доски (Мини-апп)" },
     { command: "confirm", description: "Куда слать подтверждения: group или pm" },
+    { command: "confirm_mode", description: "Кто может подтверждать задачи: админы или все" },
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
     { command: "digest", description: "Дайджест открытых задач по исполнителям" },
+    { command: "digest_time", description: "Настроить время ежедневного дайджеста" },
     { command: "board", description: "Все задачи по статусам (канбан-доска)" },
     { command: "trash", description: "Задачи в корзине (удалятся через 24 ч)" },
     { command: "sync", description: "Синхронизировать задачи с YouGile" },
@@ -70,6 +72,91 @@ const server = http.createServer(async (req, res) => {
             res.end(JSON.stringify({ ok: true }));
         } catch (e) {
             console.error('meeting-done handler error:', e);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'internal error' }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/status-change') {
+        const auth = (req.headers['authorization'] || '').replace('Bearer ', '');
+        if (WORKER_SECRET && auth !== WORKER_SECRET) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'unauthorized' }));
+            return;
+        }
+
+        let body = '';
+        for await (const chunk of req) body += chunk;
+
+        try {
+            const payload = JSON.parse(body) as { chat_id: string; changes: Array<{ title: string; old_status: string; new_status: string }> };
+            console.log(`[status-change] chat_id=${payload.chat_id} changes=${payload.changes?.length ?? 0}`);
+            await handleStatusChange(payload);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+            console.error('status-change handler error:', e);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'internal error' }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/reminder') {
+        const auth = (req.headers['authorization'] || '').replace('Bearer ', '');
+        if (WORKER_SECRET && auth !== WORKER_SECRET) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'unauthorized' }));
+            return;
+        }
+
+        let body = '';
+        for await (const chunk of req) body += chunk;
+
+        try {
+            const payload = JSON.parse(body) as { tg_id: string; title: string; deadline: string; overdue: boolean };
+            await handleReminderDue(payload);
+            console.log(`[reminder] sent to tg_id=${payload.tg_id} overdue=${payload.overdue}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        } catch (e: any) {
+            // 403 (бот заблокирован) / 400 (чат не найден) — перманентно: отдаём 200,
+            // чтобы бэкенд пометил задачу как «напомнено» и не зацикливал повтор.
+            const code = e?.response?.error_code ?? e?.code;
+            if (code === 403 || code === 400) {
+                console.warn(`[reminder] permanent failure (${code}) — giving up:`, e?.message);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, skipped: true }));
+            } else {
+                console.error('reminder handler error:', e);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'internal error' }));
+            }
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/digest') {
+        const auth = (req.headers['authorization'] || '').replace('Bearer ', '');
+        if (WORKER_SECRET && auth !== WORKER_SECRET) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'unauthorized' }));
+            return;
+        }
+
+        let body = '';
+        for await (const chunk of req) body += chunk;
+
+        try {
+            const payload = JSON.parse(body) as { chat_id: string; tenant_id: string };
+            console.log(`[digest] chat_id=${payload.chat_id} tenant=${payload.tenant_id}`);
+            await handleDigestDue(payload);
+            console.log(`[digest] ok`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+            console.error('digest handler error:', e);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'internal error' }));
         }

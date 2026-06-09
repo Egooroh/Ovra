@@ -48,6 +48,7 @@ type UpdateTaskRequest struct {
 	ColumnID  *string `json:"columnId,omitempty"`
 	Completed *bool   `json:"completed,omitempty"`
 	Archived  *bool   `json:"archived,omitempty"`
+	Deleted   *bool   `json:"deleted,omitempty"`
 }
 
 // UpdateTask applies a partial update. PUT /tasks/{id}.
@@ -85,6 +86,13 @@ type TaskInfo struct {
 func (c *Client) UnarchiveTask(ctx context.Context, token, id string) error {
 	archived := false
 	return c.UpdateTask(ctx, token, id, UpdateTaskRequest{Archived: &archived})
+}
+
+// DeleteTask soft-deletes a card in YouGile (deleted=true). The card moves to
+// YouGile's trash; GET still returns 200 with deleted=true until it is purged.
+func (c *Client) DeleteTask(ctx context.Context, token, id string) error {
+	deleted := true
+	return c.UpdateTask(ctx, token, id, UpdateTaskRequest{Deleted: &deleted})
 }
 
 // GetTaskRaw fetches the raw JSON map for a card — useful for inspecting

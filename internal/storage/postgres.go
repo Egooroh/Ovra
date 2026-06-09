@@ -74,11 +74,11 @@ func (p *Postgres) GetWorkspace(ctx context.Context, id string) (domain.Workspac
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time
+		       digest_enabled, digest_time, confirm_mode
 		FROM workspaces WHERE id = $1`, id).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -94,11 +94,11 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time
+		       digest_enabled, digest_time, confirm_mode
 		FROM workspaces WHERE chat_id = $1 LIMIT 1`, chatID).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -143,7 +143,7 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time
+		       digest_enabled, digest_time, confirm_mode
 		FROM workspaces
 		WHERE yougile_api_token_enc IS NOT NULL`)
 	if err != nil {
@@ -155,7 +155,7 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 		var ws domain.Workspace
 		if err := rows.Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime); err != nil {
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		out = append(out, ws)
@@ -176,6 +176,7 @@ func (p *Postgres) SetDigestSettings(ctx context.Context, tenantID string, enabl
 	}
 	return nil
 }
+
 // SetYougileCredentials stores the workspace login and the encrypted API token.
 func (p *Postgres) SetYougileCredentials(ctx context.Context, tenantID, login string, tokenEnc []byte) error {
 	ct, err := p.pool.Exec(ctx, `
@@ -521,6 +522,47 @@ func (p *Postgres) DeleteExpiredTasks(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("delete expired tasks: %w", err)
 	}
 	return ct.RowsAffected(), nil
+}
+
+// ListDueReminders returns tasks due within the window whose assignee can be
+// nudged in PM and that have not been reminded yet.
+func (p *Postgres) ListDueReminders(ctx context.Context, within time.Duration) ([]domain.ReminderDue, error) {
+	cutoff := time.Now().Add(within)
+	rows, err := p.pool.Query(ctx, `
+		SELECT t.id, t.tenant_id, t.title, t.deadline, u.tg_id
+		FROM tasks t
+		JOIN users u ON u.id = t.assignee_user_id
+		WHERE t.approval_status = 'approved'
+		  AND t.status <> 'done'
+		  AND t.deleted_at IS NULL
+		  AND t.reminded_at IS NULL
+		  AND t.deadline IS NOT NULL
+		  AND t.deadline <= $1
+		  AND u.tg_id <> ''
+		ORDER BY t.deadline ASC`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("list due reminders: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.ReminderDue
+	for rows.Next() {
+		var r domain.ReminderDue
+		if err := rows.Scan(&r.TaskID, &r.TenantID, &r.Title, &r.Deadline, &r.AssigneeTgID); err != nil {
+			return nil, fmt.Errorf("scan due reminder: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MarkTaskReminded stamps reminded_at = now() for the task.
+func (p *Postgres) MarkTaskReminded(ctx context.Context, taskID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE tasks SET reminded_at = now() WHERE id = $1`, taskID)
+	if err != nil {
+		return fmt.Errorf("mark task reminded: %w", err)
+	}
+	return nil
 }
 
 // --- helpers ---

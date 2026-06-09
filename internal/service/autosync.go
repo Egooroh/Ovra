@@ -1,8 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 
 	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
@@ -23,15 +26,25 @@ type AutoSyncStore interface {
 // AutoSyncer runs periodic reconciliation between Ovra and YouGile.
 // Direction: YouGile → Ovra (tasks deleted in YouGile are soft-deleted in Ovra).
 type AutoSyncer struct {
-	store  AutoSyncStore
-	yg     *yougile.Client
-	cipher *secret.Cipher
-	log    *slog.Logger
+	store        AutoSyncStore
+	yg           *yougile.Client
+	cipher       *secret.Cipher
+	botURL       string // BotInternalURL; empty → no status-change notifications
+	workerSecret string
+	log          *slog.Logger
 }
 
-// NewAutoSyncer builds an AutoSyncer.
-func NewAutoSyncer(store AutoSyncStore, yg *yougile.Client, cipher *secret.Cipher, log *slog.Logger) *AutoSyncer {
-	return &AutoSyncer{store: store, yg: yg, cipher: cipher, log: log}
+// NewAutoSyncer builds an AutoSyncer. botURL (the bot's internal HTTP base URL)
+// enables Telegram notifications when a task's status changes; empty disables them.
+func NewAutoSyncer(store AutoSyncStore, yg *yougile.Client, cipher *secret.Cipher, botURL, workerSecret string, log *slog.Logger) *AutoSyncer {
+	return &AutoSyncer{store: store, yg: yg, cipher: cipher, botURL: botURL, workerSecret: workerSecret, log: log}
+}
+
+// statusChange is one task whose board status changed during a sync pass.
+type statusChange struct {
+	Title     string `json:"title"`
+	OldStatus string `json:"old_status"`
+	NewStatus string `json:"new_status"`
 }
 
 // SyncAll reconciles every connected workspace. Errors per workspace are logged
@@ -80,6 +93,7 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 	}
 
 	deleted, assigneeUpdated, statusUpdated := 0, 0, 0
+	var changes []statusChange
 	for _, t := range tasks {
 		if t.ApprovalStatus != domain.ApprovalApproved {
 			continue
@@ -134,6 +148,11 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 				}
 			}
 			if newStatus != "" && newStatus != t.Status {
+				changes = append(changes, statusChange{
+					Title:     t.Title,
+					OldStatus: t.Status,
+					NewStatus: newStatus,
+				})
 				t.Status = newStatus
 				changed = true
 				statusUpdated++
@@ -166,5 +185,46 @@ func (s *AutoSyncer) syncTenant(ctx context.Context, ws domain.Workspace) error 
 	if deleted > 0 || assigneeUpdated > 0 || statusUpdated > 0 {
 		s.log.Info("autosync: tenant done", "tenant", ws.ID, "deleted", deleted, "assignee_updated", assigneeUpdated, "status_updated", statusUpdated)
 	}
+
+	// Notify the group chat about status changes (best-effort).
+	if len(changes) > 0 && s.botURL != "" && ws.ChatID != "" {
+		s.notifyStatusChanges(ws.ChatID, changes)
+	}
 	return nil
+}
+
+// notifyStatusChanges POSTs detected status changes to the bot's internal
+// endpoint so it can post a summary to the group chat. Best-effort; logged only.
+func (s *AutoSyncer) notifyStatusChanges(chatID string, changes []statusChange) {
+	body, err := json.Marshal(map[string]any{
+		"chat_id": chatID,
+		"changes": changes,
+	})
+	if err != nil {
+		s.log.Error("autosync: marshal status changes", "err", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(
+		context.Background(), http.MethodPost,
+		s.botURL+"/internal/status-change", bytes.NewReader(body),
+	)
+	if err != nil {
+		s.log.Error("autosync: build status-change request", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.workerSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+s.workerSecret)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.log.Error("autosync: status-change POST failed", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.log.Error("autosync: status-change unexpected status", "status", resp.StatusCode)
+	}
 }

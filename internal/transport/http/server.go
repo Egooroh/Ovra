@@ -72,6 +72,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /v1/workspaces/{tenant}/trash", s.handleClearTrash)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/digest", s.handleGetDigest)
 	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/digest", s.handleUpdateDigestSettings)
+	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/confirm-mode", s.handleSetConfirmMode)
 	mux.HandleFunc("POST /v1/events", s.handlePublishEvent)
 	mux.HandleFunc("POST /v1/meetings/summary", s.handleIngestMeeting)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/calls", s.handleScheduleCall)

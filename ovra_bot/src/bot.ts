@@ -81,6 +81,24 @@ interface PendingMeetingTask {
 }
 const pendingMeetingTasks = new Map<string, PendingMeetingTask>();
 
+// Проверка, является ли пользователь администратором (или создателем) группы.
+// Используется для гейтинга подтверждения задач из созвона: только админ,
+// которому в Telegram-группе выданы права, может одобрять/отклонять задачи.
+// Возвращает true, если пользователь может подтверждать задачи.
+// mode='everyone' — разрешено всем; mode='admin_only' — только администраторам группы.
+async function canConfirmTasks(chatId: number | string, userId: number, mode: string): Promise<boolean> {
+    if (mode === 'everyone') return true;
+    try {
+        const member = await bot.telegram.getChatMember(chatId, userId);
+        const ok = member.status === 'creator' || member.status === 'administrator';
+        console.log(`[canConfirm] chat=${chatId} user=${userId} status=${member.status} mode=${mode} → ${ok}`);
+        return ok;
+    } catch (e) {
+        console.error(`[canConfirm] chat=${chatId} user=${userId} error:`, e);
+        return false;
+    }
+}
+
 // Payload, который бэкенд шлёт боту после завершения созвона.
 export interface MeetingDonePayload {
     chat_id: string;
@@ -217,6 +235,7 @@ bot.command('start', async (ctx) => {
     }
 });
 
+<<<<<<< HEAD
 // continueToProjects — общий переход к выбору проекта после подключения доски.
 async function continueToProjects(ctx: Context, tenant: string) {
     const userId = ctx.from!.id;
@@ -347,6 +366,9 @@ bot.command('setup', async (ctx) => {
 });
 
 async function processTaskAndConfirm(ctx: Context, text: string) {
+=======
+async function processTaskAndConfirm(ctx: Context, text: string, force = false) {
+>>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
@@ -364,17 +386,31 @@ async function processTaskAndConfirm(ctx: Context, text: string) {
 
     const parsed = await parseMessageWithAI(text);
 
-    if (parsed && parsed.isTask) {
+    // force=true (постановка через реакцию ✍️/🔥) — пользователь явным жестом
+    // пометил сообщение как задачу, поэтому создаём её даже если ИИ счёл, что
+    // это не задача. Извлечённые ИИ поля используем, если они есть.
+    let task = parsed;
+    if (force && (!parsed || !parsed.isTask)) {
+        task = {
+            isTask: true,
+            title: parsed?.title || text.trim().slice(0, 100),
+            assignee: parsed?.assignee || '',
+            deadline: parsed?.deadline || '',
+            description: parsed?.description || '',
+        };
+    }
+
+    if (task && task.isTask) {
         const taskId = crypto.randomBytes(8).toString('hex');
-        pendingTasks.set(taskId, { task: parsed, tenantId: ws.tenant_id, originChatId: chatId });
+        pendingTasks.set(taskId, { task, tenantId: ws.tenant_id, originChatId: chatId });
         cleanUpCache();
 
         const messageText = `🆕 *Новая задача на подтверждение*\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
-                            `📌 *${parsed.title || 'Без названия'}*\n\n` +
-                            `👤 Исполнитель: ${parsed.assignee || '—'}\n` +
-                            `⏳ Дедлайн: ${parsed.deadline || '—'}\n` +
-                            `📝 ${parsed.description || 'без описания'}\n` +
+                            `📌 *${task.title || 'Без названия'}*\n\n` +
+                            `👤 Исполнитель: ${task.assignee || '—'}\n` +
+                            `⏳ Дедлайн: ${task.deadline || '—'}\n` +
+                            `📝 ${task.description || 'без описания'}\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `_Создать карточку в YouGile?_`;
 
@@ -766,17 +802,27 @@ bot.on("text", async (ctx, next) => {
 bot.on("message_reaction", async (ctx) => {
     const reactionInfo = ctx.messageReaction;
     const messageId = reactionInfo.message_id;
-    
-    const hasPinReaction = reactionInfo.new_reaction.some((r: any) => 
-        r.type === 'emoji' && (r.emoji === '✍️' || r.emoji === '🔥')
-    );
 
-    if (hasPinReaction) {
-        const text = recentMessages.get(messageId);
-        if (text) {
-            await processTaskAndConfirm(ctx, text);
-        }
+    const emojis = (reactionInfo.new_reaction || [])
+        .filter((r: any) => r.type === 'emoji')
+        .map((r: any) => r.emoji as string);
+    console.log(`[reaction] msg=${messageId} chat=${(reactionInfo as any).chat?.id} emojis=${JSON.stringify(emojis)} cached=${recentMessages.has(messageId)}`);
+
+    // Сравнение без variation selector (✍️ может прийти как ✍ без ️).
+    const hasPinReaction = emojis.some((e) => {
+        const base = e.replace(/️/g, '');
+        return base === '✍' || base === '🔥';
+    });
+
+    if (!hasPinReaction) return;
+
+    const text = recentMessages.get(messageId);
+    if (!text) {
+        console.log(`[reaction] msg=${messageId} нет в кэше — сообщение отправлено до рестарта бота или не текстовое`);
+        return;
     }
+    // Реакция = явное намерение создать задачу, поэтому force=true.
+    await processTaskAndConfirm(ctx, text, true);
 });
 
 // Создаёт задачу через бэкенд. force=false: при найденных дублях показывает
@@ -862,6 +908,13 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingTasks.get(taskId);
     if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (pending.originChatId) {
+        const ws = await resolveTenant(pending.originChatId).catch(() => null);
+        const mode = ws?.confirm_mode ?? 'admin_only';
+        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
+            return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+        }
+    }
     try {
         await ctx.answerCbQuery('Проверяю…');
         await submitTask(ctx, taskId, pending, false);
@@ -876,6 +929,13 @@ bot.action(/^force_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingTasks.get(taskId);
     if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (pending.originChatId) {
+        const ws = await resolveTenant(pending.originChatId).catch(() => null);
+        const mode = ws?.confirm_mode ?? 'admin_only';
+        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
+            return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+        }
+    }
     try {
         await ctx.answerCbQuery('Добавляю…');
         await submitTask(ctx, taskId, pending, true);
@@ -887,6 +947,15 @@ bot.action(/^force_(.+)$/, async (ctx) => {
 
 bot.action(/^reject_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
+    const pending = pendingTasks.get(taskId);
+    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (pending.originChatId) {
+        const ws = await resolveTenant(pending.originChatId).catch(() => null);
+        const mode = ws?.confirm_mode ?? 'admin_only';
+        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
+            return ctx.answerCbQuery('Только администратор может отклонять задачи.', { show_alert: true });
+        }
+    }
     pendingTasks.delete(taskId);
     await ctx.editMessageText('🗑️ Задача отклонена.');
 });
@@ -919,15 +988,97 @@ bot.command('confirm', async (ctx) => {
     return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
 });
 
+<<<<<<< HEAD
 async function sendHelp(ctx: Context) {
     const miniAppLine = MINI_APP_URL
         ? `👈 *Кнопка «Ovra»* слева от поля ввода — профиль и все доски.\n\n`
         : ``;
+=======
+// Настройка режима подтверждения задач: только админы или все участники.
+bot.command('confirm_mode', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Эта команда работает только в группе.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('❌ Чат не привязан к доске.');
+
+    const isAdmin = await canConfirmTasks(ctx.chat.id, ctx.from!.id, 'admin_only');
+    if (!isAdmin) {
+        return ctx.reply('⛔ Изменять режим может только администратор группы.');
+    }
+
+    const current = ws.confirm_mode ?? 'admin_only';
+    const label = current === 'everyone' ? '👥 Все участники' : '🔒 Только администраторы';
+    await ctx.reply(
+        `⚙️ *Режим подтверждения задач*\n\nСейчас: *${label}*\n\nКто может подтверждать и отклонять задачи?`,
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback(
+                    current === 'admin_only' ? '✅ Только администраторы' : 'Только администраторы',
+                    'cm_admin_only'
+                ),
+                Markup.button.callback(
+                    current === 'everyone' ? '✅ Все участники' : 'Все участники',
+                    'cm_everyone'
+                ),
+            ]),
+        }
+    );
+});
+
+bot.action('cm_admin_only', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return ctx.answerCbQuery();
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
+    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
+
+    await setConfirmMode(ws.tenant_id, 'admin_only');
+    await ctx.editMessageText(
+        '⚙️ *Режим подтверждения задач*\n\nСейчас: *🔒 Только администраторы*',
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback('✅ Только администраторы', 'cm_admin_only'),
+                Markup.button.callback('Все участники', 'cm_everyone'),
+            ]),
+        }
+    );
+    await ctx.answerCbQuery('Режим обновлён: только администраторы.');
+});
+
+bot.action('cm_everyone', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return ctx.answerCbQuery();
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
+    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
+
+    await setConfirmMode(ws.tenant_id, 'everyone');
+    await ctx.editMessageText(
+        '⚙️ *Режим подтверждения задач*\n\nСейчас: *👥 Все участники*',
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback('Только администраторы', 'cm_admin_only'),
+                Markup.button.callback('✅ Все участники', 'cm_everyone'),
+            ]),
+        }
+    );
+    await ctx.answerCbQuery('Режим обновлён: все участники.');
+});
+
+bot.command('help', async (ctx) => {
+>>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
     await ctx.reply(
         `🤖 *Ovra* — задачи из чата прямо в YouGile\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         miniAppLine +
         `*Как создать задачу:*\n` +
+<<<<<<< HEAD
         `• Напиши поручение в групповом чате\n` +
         `  _«Нужно сдать отчёт к пятнице» → карточка на подтверждение_\n` +
         `• Поставь реакцию ✍️ или 🔥 на любое сообщение\n` +
@@ -943,6 +1094,19 @@ async function sendHelp(ctx: Context) {
         `/bind Имя — привязать @ к аккаунту YouGile\n\n` +
         `*Команды в личке:*\n` +
         `/start — онбординг новой доски\n` +
+=======
+        `• просто напиши поручение в чат (напр. «нужно сделать отчёт к пятнице»)\n` +
+        `• или поставь реакцию ✍️/🔥 на любое сообщение\n` +
+        `→ я пришлю карточку на подтверждение, жми *✅ Одобрить*.\n\n` +
+        `*Команды:*\n` +
+        `/start — назначить эту личку для подтверждений (ПМ)\n` +
+        `/confirm group — подтверждения в группу\n` +
+        `/confirm pm — подтверждения в личку ПМа\n` +
+        `/confirm\\_mode — кто может подтверждать задачи (только в группе)\n` +
+        `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
+        `/digest — дайджест открытых задач по исполнителям\n` +
+        `/digest\\_time — настроить время ежедневного дайджеста\n` +
+>>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
         `/stats — статус системы\n` +
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
@@ -1190,6 +1354,12 @@ bot.action(/^mtask_ok_(.+)$/, async (ctx) => {
     const pending = pendingMeetingTasks.get(taskId);
     if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
 
+    const ws = await resolveTenant(pending.groupChatId).catch(() => null);
+    const mode = ws?.confirm_mode ?? 'admin_only';
+    if (!(await canConfirmTasks(pending.groupChatId, ctx.from!.id, mode))) {
+        return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+    }
+
     try {
         await ctx.answerCbQuery('Создаю…');
 
@@ -1219,6 +1389,15 @@ bot.action(/^mtask_ok_(.+)$/, async (ctx) => {
 
 bot.action(/^mtask_no_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
+    const pending = pendingMeetingTasks.get(taskId);
+    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+
+    const ws2 = await resolveTenant(pending.groupChatId).catch(() => null);
+    const mode2 = ws2?.confirm_mode ?? 'admin_only';
+    if (!(await canConfirmTasks(pending.groupChatId, ctx.from!.id, mode2))) {
+        return ctx.answerCbQuery('Только администратор может отклонять задачи.', { show_alert: true });
+    }
+
     pendingMeetingTasks.delete(taskId);
     await ctx.answerCbQuery();
     await ctx.editMessageText('🗑️ Задача из созвона пропущена.');
@@ -1297,6 +1476,75 @@ async function sendBoard(ctx: Context) {
 }
 bot.command('board', sendBoard);
 
+// Форматирует данные дайджеста в текст (Markdown). Возвращает null, если задач нет.
+function formatDigest(data: DigestData): string | null {
+    const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
+        + (data.unassigned?.length ?? 0);
+    if (total === 0) return null;
+
+    const lines: string[] = [`📋 *Дайджест задач*\n━━━━━━━━━━━━━━━━━━`];
+
+    for (const assignee of data.assignees) {
+        const who = assignee.tg_username
+            ? `*${assignee.full_name}* (${assignee.tg_username})`
+            : `*${assignee.full_name}*`;
+        lines.push(`\n👤 ${who}`);
+        for (const t of assignee.tasks) {
+            const dl = t.deadline
+                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                : '';
+            lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+        }
+    }
+
+    if (data.unassigned?.length) {
+        lines.push(`\n❓ *Без исполнителя*`);
+        for (const t of data.unassigned) {
+            const dl = t.deadline
+                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                : '';
+            lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+        }
+    }
+
+    lines.push(`\n━━━━━━━━━━━━━━━━━━\n_Всего открытых: ${total}_`);
+    return lines.join('\n');
+}
+
+// Шлёт напоминание о задаче в личку исполнителю — планировщик (POST /internal/reminder).
+export async function handleReminderDue(
+    payload: { tg_id: string; title: string; deadline: string; overdue: boolean }
+): Promise<void> {
+    const userId = Number(payload.tg_id);
+    if (!userId) throw new Error(`invalid tg_id: ${payload.tg_id}`);
+
+    const when = payload.deadline
+        ? new Date(payload.deadline).toLocaleString('ru-RU', {
+            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        })
+        : '—';
+
+    const text = payload.overdue
+        ? `🔴 *Просрочена задача*\n━━━━━━━━━━━━━━━━━━\n📌 ${payload.title}\n⏳ Дедлайн был: ${when}`
+        : `⏰ *Напоминание о задаче*\n━━━━━━━━━━━━━━━━━━\n📌 ${payload.title}\n📅 Дедлайн: ${when}`;
+
+    // Может упасть с 403 (бот заблокирован) / 400 (чат не найден), если юзер не
+    // запускал бота в личке — это перманентно, эндпоинт обработает отдельно.
+    await bot.telegram.sendMessage(userId, text, { parse_mode: 'Markdown' });
+}
+
+// Собирает и шлёт дайджест в чат — используется планировщиком (POST /internal/digest).
+export async function handleDigestDue(payload: { chat_id: string; tenant_id: string }): Promise<void> {
+    const chatId = Number(payload.chat_id);
+    if (!chatId) throw new Error(`invalid chat_id: ${payload.chat_id}`);
+
+    const data = await getDigest(payload.tenant_id);
+    const text = formatDigest(data);
+    if (!text) return; // нет открытых задач — не спамим пустым дайджестом
+
+    await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+}
+
 // /digest — прислать дайджест открытых задач по исполнителям.
 async function sendDigest(ctx: Context) {
     if (ctx.chat?.type === 'private') {
@@ -1309,6 +1557,7 @@ async function sendDigest(ctx: Context) {
 
     try {
         const data = await getDigest(ws.tenant_id);
+<<<<<<< HEAD
         const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
             + (data.unassigned?.length ?? 0);
 
@@ -1348,6 +1597,12 @@ async function sendDigest(ctx: Context) {
 
         await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
             lines.join('\n'), { parse_mode: 'Markdown' });
+=======
+        const text = formatDigest(data);
+
+        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+            text ?? '✅ Открытых задач нет — всё чисто!', { parse_mode: 'Markdown' });
+>>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
     } catch (e) {
         console.error('digest:', e);
         await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
@@ -1355,6 +1610,105 @@ async function sendDigest(ctx: Context) {
     }
 }
 bot.command('digest', sendDigest);
+
+// --- Настройка расписания дайджеста ---
+
+// Пресеты времени для кнопок (часовой пояс воркспейса, по умолчанию МСК).
+const DIGEST_PRESETS = ['08:00', '09:00', '10:00', '12:00', '18:00', '19:00'];
+
+// Проверка формата HH:MM с валидными часами/минутами.
+function isValidHHMM(t: string): boolean {
+    const m = /^(\d{2}):(\d{2})$/.exec(t);
+    if (!m) return false;
+    const h = +m[1]!, min = +m[2]!;
+    return h >= 0 && h <= 23 && min >= 0 && min <= 59;
+}
+
+function digestSettingsText(enabled: boolean, time: string): string {
+    const state = enabled ? `включён, ежедневно в *${time}* (МСК)` : '🔕 выключен';
+    return `🕘 *Ежедневный дайджест*\n\nСейчас: ${state}\n\n` +
+        `Выбери время кнопкой ниже или пришли своё:\n` +
+        '`/digest_time 14:30` — задать время\n' +
+        '`/digest_time off` — выключить';
+}
+
+function digestSettingsKeyboard(current: string, enabled: boolean) {
+    const timeButtons = DIGEST_PRESETS.map((t) =>
+        Markup.button.callback(enabled && t === current ? `✅ ${t}` : t, `dt_set_${t}`)
+    );
+    return Markup.inlineKeyboard([
+        timeButtons.slice(0, 3),
+        timeButtons.slice(3),
+        [Markup.button.callback(enabled ? '🔕 Выключить' : '✅ Выключен', 'dt_off')],
+    ]);
+}
+
+// /digest_time — настроить время ежедневного дайджеста (только админ).
+bot.command('digest_time', async (ctx) => {
+    if (ctx.chat.type === 'private') {
+        return ctx.reply('Используйте команду в групповом чате.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
+
+    const isAdmin = await canConfirmTasks(ctx.chat.id, ctx.from!.id, 'admin_only');
+    if (!isAdmin) return ctx.reply('⛔ Менять расписание дайджеста может только администратор группы.');
+
+    const arg = ctx.message.text.split(' ').slice(1).join(' ').trim().toLowerCase();
+
+    if (arg === 'off') {
+        await updateDigestSettings(ws.tenant_id, false, ws.digest_time || '09:00');
+        return ctx.reply('🔕 Ежедневный дайджест выключен.');
+    }
+    if (arg) {
+        if (!isValidHHMM(arg)) {
+            return ctx.reply('⚠️ Неверный формат времени. Пример: `/digest_time 09:30`', { parse_mode: 'Markdown' });
+        }
+        await updateDigestSettings(ws.tenant_id, true, arg);
+        return ctx.reply(`✅ Дайджест будет приходить ежедневно в *${arg}* (МСК).`, { parse_mode: 'Markdown' });
+    }
+
+    // Без аргумента — показать текущее состояние с кнопками.
+    const time = ws.digest_time || '09:00';
+    await ctx.reply(digestSettingsText(ws.digest_enabled, time), {
+        parse_mode: 'Markdown',
+        ...digestSettingsKeyboard(time, ws.digest_enabled),
+    });
+});
+
+bot.action(/^dt_set_(\d{2}:\d{2})$/, async (ctx) => {
+    const time = ctx.match[1]!;
+    const chatId = ctx.chat?.id;
+    if (!chatId) return ctx.answerCbQuery();
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
+    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
+
+    await updateDigestSettings(ws.tenant_id, true, time);
+    await ctx.editMessageText(digestSettingsText(true, time), {
+        parse_mode: 'Markdown',
+        ...digestSettingsKeyboard(time, true),
+    }).catch(() => { /* message not modified — игнорируем */ });
+    await ctx.answerCbQuery(`Дайджест в ${time}`);
+});
+
+bot.action('dt_off', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return ctx.answerCbQuery();
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
+    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
+
+    const time = ws.digest_time || '09:00';
+    await updateDigestSettings(ws.tenant_id, false, time);
+    await ctx.editMessageText(digestSettingsText(false, time), {
+        parse_mode: 'Markdown',
+        ...digestSettingsKeyboard(time, false),
+    }).catch(() => { /* message not modified — игнорируем */ });
+    await ctx.answerCbQuery('Дайджест выключен');
+});
 
 // Формирует текст и кнопки для сообщения корзины.
 function buildTrashMessage(tasks: any[], tenantId: string): { text: string; keyboard: any } {
@@ -1507,6 +1861,36 @@ function statusEmoji(status: string): string {
         case 'done':        return '✅';
         default:            return '•';
     }
+}
+
+// Человекочитаемое русское название статуса.
+function statusLabel(status: string): string {
+    switch (status) {
+        case 'todo':        return 'К выполнению';
+        case 'in_progress': return 'В работе';
+        case 'review':      return 'На ревью';
+        case 'done':        return 'Готово';
+        default:            return status;
+    }
+}
+
+// Уведомление о смене статусов задач в группе — планировщик autosync (POST /internal/status-change).
+export async function handleStatusChange(
+    payload: { chat_id: string; changes: Array<{ title: string; old_status: string; new_status: string }> }
+): Promise<void> {
+    const chatId = Number(payload.chat_id);
+    if (!chatId) throw new Error(`invalid chat_id: ${payload.chat_id}`);
+    if (!payload.changes || payload.changes.length === 0) return;
+
+    const lines: string[] = [`🔄 *Обновление статусов задач*\n━━━━━━━━━━━━━━━━━━`];
+    for (const c of payload.changes) {
+        lines.push(
+            `${statusEmoji(c.new_status)} *${c.title}*\n` +
+            `   ${statusLabel(c.old_status)} → *${statusLabel(c.new_status)}*`
+        );
+    }
+
+    await bot.telegram.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
 }
 
 export { bot };

@@ -189,6 +189,17 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	// Mirror the deletion into YouGile so the card disappears there too.
+	// Best-effort: a YouGile failure must not fail the local delete.
+	if s.yg != nil && s.cipher != nil && task.YougileTaskID != nil && *task.YougileTaskID != "" {
+		if token, ok := s.loadToken(r.Context(), task.TenantID); ok {
+			if err := s.yg.DeleteTask(r.Context(), token, *task.YougileTaskID); err != nil {
+				s.log.Error("yougile delete task", "task_id", id, "yougile_id", *task.YougileTaskID, "err", err)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 

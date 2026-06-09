@@ -83,6 +83,7 @@ export interface WorkspaceInfo {
     board_resolved: boolean;  // сопоставлены ли колонки
     digest_enabled: boolean;
     digest_time: string;      // "HH:MM"
+    confirm_mode: 'admin_only' | 'everyone';
 }
 
 export interface YougileMember {
@@ -218,6 +219,14 @@ export async function getTrash(tenantId: string): Promise<any[]> {
     if (!res.ok) throw new Error(`getTrash HTTP ${res.status}`);
     const data: any = await res.json();
     return data.tasks || [];
+}
+
+export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'everyone'): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/confirm-mode`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+    });
+    if (!res.ok) throw new Error(`setConfirmMode HTTP ${res.status}`);
 }
 
 export async function updateDigestSettings(tenantId: string, enabled: boolean, time: string): Promise<void> {

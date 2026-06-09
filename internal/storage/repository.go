@@ -6,6 +6,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"ovra/internal/domain"
 )
@@ -33,6 +34,8 @@ type Repository interface {
 
 	// Workspace digest settings.
 	SetDigestSettings(ctx context.Context, tenantID string, enabled bool, digestTime string) error
+	// SetConfirmMode updates the task-confirmation mode for a workspace.
+	SetConfirmMode(ctx context.Context, tenantID string, mode string) error
 
 	// Users.
 	UpsertUser(ctx context.Context, u domain.User) (domain.User, error)
@@ -66,4 +69,10 @@ type Repository interface {
 	// DeleteExpiredTasks physically removes tasks that have been in the trash for
 	// more than 24 h. Returns the number of rows deleted.
 	DeleteExpiredTasks(ctx context.Context) (int64, error)
+	// ListDueReminders returns approved, non-done, non-deleted tasks whose
+	// deadline is at or before now+within, that have an assignee with a Telegram
+	// id, and that have not been reminded yet (reminded_at IS NULL).
+	ListDueReminders(ctx context.Context, within time.Duration) ([]domain.ReminderDue, error)
+	// MarkTaskReminded stamps reminded_at = now() so the task is not nudged again.
+	MarkTaskReminded(ctx context.Context, taskID string) error
 }

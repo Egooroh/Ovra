@@ -52,6 +52,8 @@ type Workspace struct {
 	// Digest settings. DigestTime is "HH:MM" in the workspace timezone.
 	DigestEnabled bool   `yaml:"digest_enabled"`
 	DigestTime    string `yaml:"digest_time"`
+	// ConfirmMode controls who can approve/reject tasks: "admin_only" or "everyone".
+	ConfirmMode string `yaml:"confirm_mode"`
 }
 
 // User is a workspace member mapped to their YouGile account.
@@ -82,6 +84,17 @@ type Task struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	DeletedAt      *time.Time // non-nil → in trash; physically removed after 24 h
+}
+
+// ReminderDue is a task whose deadline is approaching (or past) and whose
+// assignee should be nudged in their private Telegram chat. It carries just the
+// fields the reminder needs, joined from tasks + users.
+type ReminderDue struct {
+	TaskID       string
+	TenantID     string
+	Title        string
+	Deadline     time.Time
+	AssigneeTgID string // Telegram user id of the assignee
 }
 
 // Meeting is the source of meeting-derived tasks (transcript/summary).
