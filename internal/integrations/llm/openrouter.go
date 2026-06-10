@@ -44,7 +44,10 @@ func New(cfg Config) *Client {
 	if cfg.Model == "" {
 		cfg.Model = defaultModel
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: 30 * time.Second}}
+	// 8s cap: the dedup judge / column classifier are best-effort and fall back
+	// gracefully (trgm shortlist / keyword match). A slow OpenRouter response must
+	// not stall task creation for 30s and block the bot's update polling.
+	return &Client{cfg: cfg, http: &http.Client{Timeout: 8 * time.Second}}
 }
 
 // systemPrompt instructs the model to return a strict JSON array aligned with

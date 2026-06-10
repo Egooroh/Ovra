@@ -16,6 +16,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { HttpsProxyAgent as SocksProxyAgent } from 'https-proxy-agent';
+import { transcribeOgg } from "./services/speechkit.js";
 
 dotenv.config();
 
@@ -393,11 +394,17 @@ bot.command('setup', async (ctx) => {
     }
 });
 
+// Резолвит «я» в имя отправителя: сначала ищет /bind-привязку, потом берёт имя из Telegram.
+function resolveSelfAssignee(sender: { first_name: string; last_name?: string; username?: string }): string {
+    const tag = sender.username ? `@${sender.username.toLowerCase()}` : null;
+    if (tag && userMapping[tag]) return userMapping[tag];
+    return [sender.first_name, sender.last_name].filter(Boolean).join(' ');
+}
+
 async function processTaskAndConfirm(ctx: Context, text: string, force = false) {
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
-    // К какому воркспейсу привязан этот чат?
     const ws = await resolveTenant(chatId).catch(() => null);
     if (!ws) {
         if (ctx.chat?.type !== 'private')
@@ -409,26 +416,41 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
         return;
     }
 
-    const parsed = await parseMessageWithAI(text);
+    const tasks = await parseMessageWithAI(text);
 
-    // force=true (постановка через реакцию ✍️/🔥) — пользователь явным жестом
-    // пометил сообщение как задачу, поэтому создаём её даже если ИИ счёл, что
-    // это не задача. Извлечённые ИИ поля используем, если они есть.
-    let task = parsed;
-    if (force && (!parsed || !parsed.isTask)) {
-        task = {
+    // force=true (реакция ✍️/🔥) — создаём задачу даже если ИИ ничего не нашёл.
+    if (force && tasks.length === 0) {
+        tasks.push({
             isTask: true,
-            title: parsed?.title || text.trim().slice(0, 100),
-            assignee: parsed?.assignee || '',
-            deadline: parsed?.deadline || '',
-            description: parsed?.description || '',
-        };
+            title: text.trim().slice(0, 100),
+            assignee: '',
+            deadline: '',
+            description: '',
+        });
     }
 
-    if (task && task.isTask) {
+    if (tasks.length === 0) return;
+
+    const target = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
+    const targetChatId = target === 'group' ? chatId : activePmChatId;
+
+    if (!targetChatId) {
+        console.error("❌ ID ПМа не установлен! Некуда отправлять задачу.");
+        if (ctx.chat && ctx.chat.type !== 'private') {
+            await ctx.reply("❌ Задача найдена, но я не знаю, кому её отправить на подтверждение. Кто-нибудь, напишите мне /start в личные сообщения, или используйте /confirm group.");
+        }
+        return;
+    }
+
+    for (const task of tasks) {
+        // «я» → имя отправителя
+        const assigneeRaw = (task.assignee || '').trim();
+        if (/^я(\s|$)/i.test(assigneeRaw) && ctx.from) {
+            task.assignee = resolveSelfAssignee(ctx.from);
+        }
+
         const taskId = crypto.randomBytes(8).toString('hex');
         pendingTasks.set(taskId, { task, tenantId: ws.tenant_id, originChatId: chatId });
-        cleanUpCache();
 
         const messageText = `🆕 *Новая задача на подтверждение*\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
@@ -438,17 +460,6 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
                             `📝 ${task.description || 'без описания'}\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `_Создать карточку в YouGile?_`;
-
-        const target = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
-        const targetChatId = target === 'group' ? chatId : activePmChatId;
-
-        if (!targetChatId) {
-            console.error("❌ ID ПМа не установлен! Некуда отправлять задачу.");
-            if (ctx.chat && ctx.chat.type !== 'private') {
-                await ctx.reply("❌ Задача найдена, но я не знаю, кому её отправить на подтверждение. Кто-нибудь, напишите мне /start в личные сообщения, или используйте /confirm group.");
-            }
-            return;
-        }
 
         try {
             await ctx.telegram.sendMessage(targetChatId, messageText, {
@@ -462,6 +473,8 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
             console.error("❌ Ошибка отправки подтверждения.", error);
         }
     }
+
+    cleanUpCache();
 }
 
 // ---- Управление календарями ----
@@ -652,6 +665,40 @@ bot.on('document', async (ctx) => {
     } catch (e) {
         console.error('calendar document:', e);
         await ctx.reply('❌ Не удалось обработать файл. Попробуйте ещё раз.');
+    }
+});
+
+// ---- Голосовые сообщения → транскрипция SpeechKit → задача ----
+// Telegram шлёт голосовые в формате OGG/Opus 48kHz — именно то, что ожидает
+// синхронный REST API SpeechKit (ограничение: ≤ 60 сек на один запрос).
+bot.on('voice', async (ctx) => {
+    if (ctx.chat.type === 'private') return;
+
+    const voice = ctx.message.voice;
+    if (voice.duration > 29) {
+        console.log(`[voice] msg_id=${ctx.message.message_id} duration=${voice.duration}s > 29 — too long for SpeechKit sync API`);
+        await ctx.reply('⚠️ Голосовое слишком длинное (максимум 30 сек). Запишите покороче.', {
+            reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true }
+        });
+        return;
+    }
+
+    try {
+        const link = await ctx.telegram.getFileLink(voice.file_id);
+        const resp = await fetch(link.href, { signal: AbortSignal.timeout(30_000) });
+        if (!resp.ok) {
+            console.error(`[voice] download failed: ${resp.status}`);
+            return;
+        }
+
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const text = await transcribeOgg(buffer);
+        if (!text) return;
+
+        console.log(`[voice] msg_id=${ctx.message.message_id} text="${text}"`);
+        await processTaskAndConfirm(ctx, text);
+    } catch (e) {
+        console.error('[voice] handler error:', e);
     }
 });
 
@@ -876,6 +923,18 @@ bot.on('message_reaction', async (ctx) => {
 
 // Создаёт задачу через бэкенд. force=false: при найденных дублях показывает
 // подтверждение «всё равно добавить?». force=true: создаёт в обход дедупа.
+// Ответ на callback-кнопку — косметический («Проверяю…»). Telegram протухает
+// callback_query за ~15с, поэтому при медленном бэкенде answerCbQuery может
+// бросить «query is too old». Эта ошибка НЕ должна ронять создание задачи —
+// глотаем её здесь.
+async function ack(ctx: Context, text?: string, alert = false): Promise<void> {
+    try {
+        await ctx.answerCbQuery(text, alert ? { show_alert: true } : undefined);
+    } catch {
+        /* подтверждение нажатия не критично */
+    }
+}
+
 async function submitTask(ctx: Context, taskId: string, pending: PendingTask, force: boolean) {
     const taskData = pending.task;
 
@@ -956,42 +1015,40 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
 bot.action(/^approve_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingTasks.get(taskId);
-    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (!pending) return ack(ctx, 'Задача устарела или не найдена.');
     if (pending.originChatId) {
         const ws = await resolveTenant(pending.originChatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
         if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
-            return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+            return ack(ctx, 'Только администратор может подтверждать задачи.', true);
         }
     }
-    try {
-        await ctx.answerCbQuery('Проверяю…');
-        await submitTask(ctx, taskId, pending, false);
-    } catch (error) {
-        console.error(error);
-        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.');
-    }
+    await ack(ctx, 'Проверяю…');
+    // Не блокируем поллинг: тяжёлый запрос в бэкенд (дедуп + YouGile) уходит в фон,
+    // иначе следующие клики висят в очереди и их callback_query протухает.
+    submitTask(ctx, taskId, pending, false).catch(async (error) => {
+        console.error('approve submitTask error:', error);
+        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.').catch(() => {});
+    });
 });
 
 // «Да, добавить» — создать несмотря на найденные дубли.
 bot.action(/^force_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingTasks.get(taskId);
-    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (!pending) return ack(ctx, 'Задача устарела или не найдена.');
     if (pending.originChatId) {
         const ws = await resolveTenant(pending.originChatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
         if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
-            return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+            return ack(ctx, 'Только администратор может подтверждать задачи.', true);
         }
     }
-    try {
-        await ctx.answerCbQuery('Добавляю…');
-        await submitTask(ctx, taskId, pending, true);
-    } catch (error) {
-        console.error(error);
-        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.');
-    }
+    await ack(ctx, 'Добавляю…');
+    submitTask(ctx, taskId, pending, true).catch(async (error) => {
+        console.error('force submitTask error:', error);
+        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.').catch(() => {});
+    });
 });
 
 bot.action(/^reject_(.+)$/, async (ctx) => {
@@ -1385,16 +1442,16 @@ export async function handleMeetingDone(payload: MeetingDonePayload): Promise<vo
 bot.action(/^mtask_ok_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingMeetingTasks.get(taskId);
-    if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
+    if (!pending) return ack(ctx, 'Задача устарела или не найдена.');
 
     const ws = await resolveTenant(pending.groupChatId).catch(() => null);
     const mode = ws?.confirm_mode ?? 'admin_only';
     if (!(await canConfirmTasks(pending.groupChatId, ctx.from!.id, mode))) {
-        return ctx.answerCbQuery('Только администратор может подтверждать задачи.', { show_alert: true });
+        return ack(ctx, 'Только администратор может подтверждать задачи.', true);
     }
 
     try {
-        await ctx.answerCbQuery('Создаю…');
+        await ack(ctx, 'Создаю…');
 
         let assignee = pending.assignee;
         if (assignee.startsWith('@')) {

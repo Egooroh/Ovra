@@ -74,6 +74,7 @@ type miniappTgUser struct {
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
 	Username  string `json:"username"`
+	PhotoURL  string `json:"photo_url"`
 }
 
 func extractTgUser(vals url.Values) (miniappTgUser, error) {
@@ -115,6 +116,7 @@ type miniappVerifyResponse struct {
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name,omitempty"`
 		Username  string `json:"username,omitempty"`
+		PhotoURL  string `json:"photo_url,omitempty"`
 	} `json:"user"`
 	Workspace workspaceResponse `json:"workspace"`
 	IsAdmin   bool              `json:"is_admin"`
@@ -165,6 +167,7 @@ func (s *Server) handleMiniAppVerify(w http.ResponseWriter, r *http.Request) {
 	resp.User.FirstName = user.FirstName
 	resp.User.LastName = user.LastName
 	resp.User.Username = user.Username
+	resp.User.PhotoURL = user.PhotoURL
 	resp.Workspace = s.workspaceResp(r.Context(), ws)
 	resp.IsAdmin = ws.HostTgID == fmt.Sprintf("%d", user.ID)
 
@@ -313,6 +316,7 @@ type miniappWorkspacesResponse struct {
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name,omitempty"`
 		Username  string `json:"username,omitempty"`
+		PhotoURL  string `json:"photo_url,omitempty"`
 	} `json:"user"`
 	Workspaces []miniappWorkspaceItem `json:"workspaces"`
 }
@@ -360,6 +364,7 @@ func (s *Server) handleMiniAppWorkspaces(w http.ResponseWriter, r *http.Request)
 	resp.User.FirstName = user.FirstName
 	resp.User.LastName = user.LastName
 	resp.User.Username = user.Username
+	resp.User.PhotoURL = user.PhotoURL
 	resp.Workspaces = make([]miniappWorkspaceItem, 0, len(list))
 	for _, ws := range list {
 		resp.Workspaces = append(resp.Workspaces, miniappWorkspaceItem{

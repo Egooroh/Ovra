@@ -40,12 +40,11 @@
     }
     .header-logo {
       width: 36px; height: 36px;
-      background: var(--btn);
+      background: #3450CD;
       border-radius: 10px;
       display: flex; align-items: center; justify-content: center;
-      color: var(--btn-text);
-      font-size: 18px; font-weight: 700;
     }
+    .header-logo svg { width: 24px; height: auto; display: block; }
     .header-title { font-weight: 700; font-size: 17px; }
     .header-sub   { font-size: 12px; color: var(--hint); margin-top: 1px; }
 
@@ -67,7 +66,9 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 20px; font-weight: 700;
       flex-shrink: 0;
+      overflow: hidden;
     }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
     .profile-name  { font-weight: 600; font-size: 16px; }
     .profile-user  { font-size: 13px; color: var(--hint); margin-top: 2px; }
 
@@ -406,7 +407,15 @@
 
 <!-- ── Header ── -->
 <div class="header">
-  <div class="header-logo">O</div>
+  <div class="header-logo">
+    <svg viewBox="0 0 106 72" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Ovra" role="img">
+      <path d="M4.90625 28.2344C6.28574 30.9469 7.76304 33.5393 9.33105 35.999C7.76319 38.4585 6.28562 41.0505 4.90625 43.7627C4.40817 43.0546 3.91702 42.338 3.43652 41.6113C2.24142 39.8038 1.0962 37.931 0 35.999C1.0962 34.067 2.24142 32.1942 3.43652 30.3867C3.91717 29.6598 4.40801 28.9426 4.90625 28.2344Z" fill="white"/>
+      <path d="M100.873 28.2344C101.371 28.9427 101.862 29.6597 102.343 30.3867C103.538 32.1943 104.684 34.0669 105.78 35.999C104.684 37.9311 103.538 39.8038 102.343 41.6113C101.862 42.3381 101.371 43.0546 100.873 43.7627C99.4936 41.0503 98.0153 38.4587 96.4473 35.999C98.0154 33.5391 99.4935 30.947 100.873 28.2344Z" fill="white"/>
+      <path d="M52.8828 0C72.3086 0 89.0412 11.4253 100.866 28.2344C99.4865 30.9473 98.0087 33.5399 96.4404 36C85.4363 18.7382 69.9892 8 52.8828 8C35.7763 8 20.3284 18.738 9.32422 36C7.75596 33.5399 6.2781 30.9473 4.89844 28.2344C16.7234 11.4251 33.4569 0 52.8828 0Z" fill="white"/>
+      <path d="M96.4404 36C98.0086 38.4599 99.4866 41.052 100.866 43.7646C89.0412 60.5741 72.3088 72 52.8828 72C33.4566 72 16.7234 60.5743 4.89844 43.7646C6.27799 41.052 7.75611 38.4599 9.32422 36C20.3284 53.262 35.7763 64 52.8828 64C69.9892 64 85.4363 53.2618 96.4404 36Z" fill="white"/>
+      <path d="M53 16C56.3837 16 59.5704 16.8419 62.3643 18.3252C62.104 18.2996 61.8402 18.2861 61.5732 18.2861C57.155 18.2861 53.5732 21.8679 53.5732 26.2861C53.5733 30.7044 57.155 34.2861 61.5732 34.2861C65.9914 34.286 69.5732 30.7043 69.5732 26.2861C69.5732 25.6761 69.5014 25.0827 69.3721 24.5117C71.6574 27.7626 73 31.7243 73 36C73 47.0457 64.0457 56 53 56C41.9543 56 33 47.0457 33 36C33 24.9543 41.9543 16 53 16Z" fill="white"/>
+    </svg>
+  </div>
   <div>
     <div class="header-title">Ovra</div>
     <div class="header-sub" id="headerSub">Настройка рабочей доски</div>
@@ -623,6 +632,24 @@ tg.expand();
 
 function el(id) { return document.getElementById(id); }
 
+// Render an avatar: profile photo from Telegram if available, otherwise the
+// first letter of the name. Falls back to the letter if the image fails to load.
+function setAvatar(id, photoUrl, letter) {
+  const node = el(id);
+  if (!node) return;
+  const initial = (letter || '?').toUpperCase();
+  if (photoUrl) {
+    const img = new Image();
+    img.alt = initial;
+    img.onerror = () => { node.textContent = initial; };
+    img.src = photoUrl;
+    node.textContent = '';
+    node.appendChild(img);
+  } else {
+    node.textContent = initial;
+  }
+}
+
 function show(id) { el(id).classList.remove('hidden'); }
 function hide(id) { el(id).classList.add('hidden');    }
 
@@ -691,7 +718,7 @@ async function initHome() {
     const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
     el('homeName').textContent = fullName || 'Пользователь';
     if (user.username) el('homeUsername').textContent = '@' + user.username;
-    el('homeAvatar').textContent = (fullName[0] || '?').toUpperCase();
+    setAvatar('homeAvatar', user.photo_url, fullName[0]);
     el('headerSub').textContent = 'Профиль';
 
     const listEl = el('homeBoardList');
@@ -744,7 +771,7 @@ function renderMain() {
   const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
   el('profileName').textContent = fullName || 'Пользователь';
   if (user.username) el('profileUsername').textContent = '@' + user.username;
-  el('avatarEl').textContent = (fullName[0] || '?').toUpperCase();
+  setAvatar('avatarEl', user.photo_url, fullName[0]);
   el('profileBadge').innerHTML = roleBadge(isAdmin);
 
   // Header subtitle
