@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // capture records the last request a fake server received.
@@ -128,6 +130,31 @@ func TestListUsersAndFind(t *testing.T) {
 	}
 	if _, ok := FindUserByName(users, "no one"); ok {
 		t.Fatal("unexpected match")
+	}
+}
+
+// TestCreateTaskNotRetriedOnTimeout guards against duplicate cards: when a POST
+// /tasks times out (YouGile is slow but may already have created the card), the
+// client must NOT retry — a retry would create a second card on the board.
+func TestCreateTaskNotRetriedOnTimeout(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		time.Sleep(200 * time.Millisecond) // outlast the client timeout below
+		_, _ = io.WriteString(w, `{"id":"task-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(WithBaseURL(srv.URL), WithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond}))
+
+	_, err := c.CreateTask(context.Background(), "tok", CreateTaskRequest{Title: "t", ColumnID: "c"})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	// Allow any in-flight retry attempt to land before asserting.
+	time.Sleep(300 * time.Millisecond)
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("POST was retried after timeout: server saw %d requests, want 1", got)
 	}
 }
 

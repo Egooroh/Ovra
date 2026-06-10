@@ -101,6 +101,12 @@ const loginSessions = new Map<number, LoginSession>();
 // ключ — messageId сообщения «Задача создана», значение — task id из бэкенда.
 const taskIdByMessage = new Map<number, string>();
 
+// submitting — taskId, по которым прямо сейчас идёт создание задачи в бэкенде.
+// Защита от двойного клика: быстрый double-tap по «Одобрить»/«Да, добавить»
+// иначе запустит два параллельных запроса, и дедуп каждого пройдёт раньше,
+// чем сохранится первый, — на доске появятся две карточки.
+const submitting = new Set<string>();
+
 // Задачи из созвона, ожидающие подтверждения в групповом чате.
 interface PendingMeetingTask {
     title: string;
@@ -841,7 +847,7 @@ bot.on("text", async (ctx, next) => {
     // Кэширование группового текста — в middleware выше (до всех обработчиков).
 
     // Telemost-ссылка в сообщении → планируем созвон без участия PM.
-    const telemostUrl = message.text.match(/https?:\/\/telemost\.yandex\.ru\/j\/[^\s]+/)?.[0];
+    const telemostUrl = message.text.match(/https?:\/\/telemost(?:\.\d+)?\.yandex\.ru\/j\/[^\s]+/)?.[0];
     if (telemostUrl) {
         const ws = await resolveTenant(ctx.chat.id).catch(() => null);
         if (ws) {
@@ -1012,6 +1018,25 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
     pendingTasks.delete(taskId);
 }
 
+// guardedSubmit запускает submitTask с защитой от двойного клика и уносит
+// тяжёлый запрос в фон (не блокируя поллинг). Захват taskId синхронный — между
+// has() и add() нет await, поэтому из двух параллельных кликов проходит один.
+// finally снимает замок и для успеха, и для ветки «найдены дубли» (там submitTask
+// возвращается, оставляя pending) — чтобы последующий клик «Да, добавить» прошёл.
+function guardedSubmit(ctx: Context, taskId: string, pending: PendingTask, force: boolean): void {
+    if (submitting.has(taskId)) {
+        void ack(ctx, 'Уже обрабатываю эту задачу…');
+        return;
+    }
+    submitting.add(taskId);
+    submitTask(ctx, taskId, pending, force)
+        .catch(async (error) => {
+            console.error('submitTask error:', error);
+            await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.').catch(() => {});
+        })
+        .finally(() => submitting.delete(taskId));
+}
+
 bot.action(/^approve_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
     const pending = pendingTasks.get(taskId);
@@ -1026,10 +1051,7 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
     await ack(ctx, 'Проверяю…');
     // Не блокируем поллинг: тяжёлый запрос в бэкенд (дедуп + YouGile) уходит в фон,
     // иначе следующие клики висят в очереди и их callback_query протухает.
-    submitTask(ctx, taskId, pending, false).catch(async (error) => {
-        console.error('approve submitTask error:', error);
-        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.').catch(() => {});
-    });
+    guardedSubmit(ctx, taskId, pending, false);
 });
 
 // «Да, добавить» — создать несмотря на найденные дубли.
@@ -1045,10 +1067,7 @@ bot.action(/^force_(.+)$/, async (ctx) => {
         }
     }
     await ack(ctx, 'Добавляю…');
-    submitTask(ctx, taskId, pending, true).catch(async (error) => {
-        console.error('force submitTask error:', error);
-        await ctx.editMessageText('❌ Не удалось создать задачу в YouGile. Подробности — в логах бэкенда.').catch(() => {});
-    });
+    guardedSubmit(ctx, taskId, pending, true);
 });
 
 bot.action(/^reject_(.+)$/, async (ctx) => {

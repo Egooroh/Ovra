@@ -14,8 +14,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -57,6 +59,25 @@ func New(opts ...Option) *Client {
 	return c
 }
 
+// retryableTransport reports whether a c.http.Do error may be retried safely.
+//
+// Idempotent methods (GET, PUT, DELETE) can always be retried. For the
+// non-idempotent POST we only retry when the request provably never reached the
+// server — a dial failure (connection refused, DNS error). A timeout is NOT
+// retried for POST: the request may already have been delivered and processed
+// (e.g. YouGile created the card but was slow to respond), so a retry would
+// create a duplicate.
+func retryableTransport(method string, err error) bool {
+	if method != http.MethodPost {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" && !opErr.Timeout() {
+		return true
+	}
+	return false
+}
+
 // APIError is returned for non-2xx responses.
 type APIError struct {
 	Status int
@@ -80,8 +101,9 @@ func (c *Client) do(ctx context.Context, method, path, token string, body, out a
 	}
 
 	// Retry transient network failures (e.g. TLS handshake timeouts to
-	// yougile.com). A connection-level error means the request never reached
-	// the server, so retrying is safe even for POST.
+	// yougile.com). Retrying is only safe when the request never reached the
+	// server — see retryableTransport. A POST that timed out may have already
+	// been processed by YouGile, so retrying it would create a second card.
 	const attempts = 3
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -112,7 +134,10 @@ func (c *Client) do(ctx context.Context, method, path, token string, body, out a
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("%s %s: %w", method, path, err)
-			continue // network error — retry
+			if !retryableTransport(method, err) {
+				return lastErr // non-idempotent + may have reached server — don't retry
+			}
+			continue // safe to retry — request never reached the server
 		}
 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

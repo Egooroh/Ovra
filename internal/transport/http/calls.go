@@ -41,8 +41,9 @@ func (s *Server) handleScheduleCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "join_url is required")
 		return
 	}
-	if !strings.Contains(body.JoinURL, "telemost.yandex.ru") {
-		writeError(w, http.StatusBadRequest, "join_url must be a Telemost link (telemost.yandex.ru)")
+	if !strings.Contains(body.JoinURL, "telemost.yandex.ru") &&
+		!strings.Contains(body.JoinURL, "telemost.360.yandex.ru") {
+		writeError(w, http.StatusBadRequest, "join_url must be a Telemost link (telemost.yandex.ru or telemost.360.yandex.ru)")
 		return
 	}
 

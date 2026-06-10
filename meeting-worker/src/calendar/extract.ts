@@ -3,10 +3,11 @@
 //
 // Supported formats:
 //   https://telemost.yandex.ru/j/12345678
+//   https://telemost.360.yandex.ru/j/12345678          (Yandex 360 subdomain)
 //   https://telemost.yandex.ru/j/12345678?utm_source=...
 //   (with or without trailing path/query)
 
-const TELEMOST_RE = /https:\/\/telemost\.yandex\.ru\/j\/[a-zA-Z0-9_%-]+(?:[?&][^\s"'<>[\]{}|\\^`]*)*/;
+const TELEMOST_RE = /https:\/\/telemost(?:\.\d+)?\.yandex\.ru\/j\/[a-zA-Z0-9_%-]+(?:[?&][^\s"'<>[\]{}|\\^`]*)*/;
 
 /**
  * node-ical fields (summary, location, description) can be either a plain
