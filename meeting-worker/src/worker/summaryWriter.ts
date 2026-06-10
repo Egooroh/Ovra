@@ -67,9 +67,7 @@ export async function writeSummary(
     log.info({ callId, chars: fullText.length }, "summaryWriter: starting");
     const llmStart = Date.now();
 
-    ({ summary, tasks } = fullText.length <= CHUNK_CHARS
-      ? await summarizeDirect(fullText, title ?? "")
-      : await summarizeChunked(fullText, title ?? ""));
+    ({ summary, tasks } = await summarize(fullText, title ?? ""));
 
     log.info({ callId, llmMs: Date.now() - llmStart, tasks: tasks.length }, "summaryWriter: llm done");
   }
@@ -124,6 +122,14 @@ export async function writeSummary(
 interface LlmResult {
   summary: string;
   tasks: MeetingTask[];
+}
+
+// Выбирает стратегию по длине транскрипта. Экспортируется, чтобы dev-утилиты
+// (testSummary) гоняли ровно тот же код, что и прод.
+export async function summarize(transcript: string, title: string): Promise<LlmResult> {
+  return transcript.length <= CHUNK_CHARS
+    ? summarizeDirect(transcript, title)
+    : summarizeChunked(transcript, title);
 }
 
 // Короткий созвон — один запрос.
