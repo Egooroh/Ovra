@@ -144,9 +144,11 @@ func main() {
 
 	// Background job: auto-sync YouGile→Ovra every 5 minutes.
 	// Tasks deleted in YouGile are soft-deleted in Ovra automatically.
+	// On startup, runs once immediately to import any tasks already on the board.
 	if cipher != nil {
 		autoSyncer := service.NewAutoSyncer(repo, yg, cipher, cfg.BotInternalURL, cfg.WorkerSecret, log)
 		go func() {
+			autoSyncer.SyncAll(context.Background())
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
 			for {

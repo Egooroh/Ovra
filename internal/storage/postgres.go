@@ -177,6 +177,20 @@ func (p *Postgres) SetDigestSettings(ctx context.Context, tenantID string, enabl
 	return nil
 }
 
+// SetConfirmMode updates the task-confirmation mode for a workspace.
+func (p *Postgres) SetConfirmMode(ctx context.Context, tenantID string, mode string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE workspaces SET confirm_mode = $2 WHERE id = $1`,
+		tenantID, mode)
+	if err != nil {
+		return fmt.Errorf("set confirm mode: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetYougileCredentials stores the workspace login and the encrypted API token.
 func (p *Postgres) SetYougileCredentials(ctx context.Context, tenantID, login string, tokenEnc []byte) error {
 	ct, err := p.pool.Exec(ctx, `

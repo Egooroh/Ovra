@@ -345,6 +345,61 @@
 
     /* hide/show helpers */
     .hidden { display: none !important; }
+
+    /* ── Edit-task bottom sheet ── */
+    .sheet-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,.5);
+      z-index: 100; opacity: 0; pointer-events: none; transition: opacity .25s;
+    }
+    .sheet-backdrop.open { opacity: 1; pointer-events: auto; }
+    .edit-sheet {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--bg); border-radius: 16px 16px 0 0;
+      padding: 0 0 calc(env(safe-area-inset-bottom, 0px) + 16px);
+      z-index: 101; transform: translateY(100%);
+      transition: transform .3s cubic-bezier(.4,0,.2,1);
+      max-height: 92vh; overflow-y: auto;
+    }
+    .edit-sheet.open { transform: translateY(0); }
+    .sheet-handle { width: 36px; height: 4px; background: rgba(0,0,0,.18); border-radius: 2px; margin: 10px auto 0; }
+    .sheet-header {
+      padding: 14px 20px 10px; display: flex; align-items: center;
+      justify-content: space-between; border-bottom: 1px solid rgba(0,0,0,.07);
+    }
+    .sheet-title { font-weight: 700; font-size: 16px; }
+    .sheet-close {
+      background: var(--bg2); border: none; color: var(--hint);
+      width: 28px; height: 28px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; font-size: 16px; line-height: 1;
+    }
+    .sheet-close:active { opacity: .6; }
+    .sheet-body { padding: 14px 20px; }
+    .sheet-field { margin-bottom: 14px; }
+    .sheet-field label {
+      display: block; font-size: 11px; font-weight: 700; color: var(--hint);
+      margin-bottom: 5px; text-transform: uppercase; letter-spacing: .4px;
+    }
+    .sheet-field input, .sheet-field textarea, .sheet-field select {
+      width: 100%; background: var(--bg2); border: none; border-radius: 10px;
+      padding: 10px 12px; font-size: 15px; color: var(--text); outline: none;
+      -webkit-appearance: none; appearance: none; font-family: inherit;
+    }
+    .sheet-field textarea { resize: none; min-height: 68px; }
+    .sheet-field input:focus, .sheet-field textarea:focus, .sheet-field select:focus {
+      box-shadow: 0 0 0 2px var(--btn);
+    }
+    .sheet-save {
+      width: 100%; padding: 13px; background: var(--btn); color: var(--btn-text);
+      border: none; border-radius: var(--radius); font-size: 15px; font-weight: 700;
+      cursor: pointer; margin-top: 4px; transition: opacity .15s;
+    }
+    .sheet-save:active { opacity: .8; }
+    .sheet-save:disabled { opacity: .45; pointer-events: none; }
+
+    /* tappable task rows */
+    .task-item { cursor: pointer; border-radius: 8px; transition: background .12s; padding-right: 4px; }
+    .task-item:active { background: rgba(0,0,0,.04); }
   </style>
 </head>
 <body>
@@ -515,6 +570,47 @@
   </div><!-- /dashboardSection -->
 
 </div><!-- /mainContent -->
+
+<!-- ── Edit-task bottom sheet ── -->
+<div class="sheet-backdrop" id="editBackdrop" onclick="closeEditSheet()"></div>
+<div class="edit-sheet" id="editSheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header">
+    <span class="sheet-title">Редактировать задачу</span>
+    <button class="sheet-close" onclick="closeEditSheet()">✕</button>
+  </div>
+  <div class="sheet-body">
+    <input type="hidden" id="editTaskId" />
+    <div class="sheet-field">
+      <label>Название</label>
+      <input type="text" id="editTitle" placeholder="Название задачи" />
+    </div>
+    <div class="sheet-field">
+      <label>Описание</label>
+      <textarea id="editDesc" placeholder="Описание (необязательно)"></textarea>
+    </div>
+    <div class="sheet-field">
+      <label>Статус</label>
+      <select id="editStatus">
+        <option value="in_progress">В работе</option>
+        <option value="todo">В очереди</option>
+        <option value="review">На ревью</option>
+        <option value="done">Готово</option>
+      </select>
+    </div>
+    <div class="sheet-field">
+      <label>Исполнитель</label>
+      <select id="editAssignee">
+        <option value="">Не назначен</option>
+      </select>
+    </div>
+    <div class="sheet-field">
+      <label>Дедлайн</label>
+      <input type="date" id="editDeadline" />
+    </div>
+    <button class="sheet-save" id="editSaveBtn" onclick="saveTask()">Сохранить</button>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -1012,14 +1108,16 @@ function renderMemberTasks(data) {
       const dl = t.deadline
         ? new Date(t.deadline).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
         : '';
-      const overdueSpan = t.overdue ? '<span class="task-overdue"> · Просрочено</span>' : '';
-      const meta = [label, dl ? dl + (t.overdue ? '' : '') : ''].filter(Boolean).join(' · ');
-      return `<div class="task-item">
-        <div class="task-dot" style="background:${color};"></div>
-        <div>
+      const dlMeta = dl ? (t.overdue ? `<span class="task-overdue">${dl} · Просрочено</span>` : dl) : '';
+      return `<div class="task-item" onclick="openEditSheet('${escHtml(t.id)}')">
+        <div style="flex:1;min-width:0;">
           <div class="task-title">${escHtml(t.title)}</div>
-          <div class="task-meta">${escHtml(meta)}${overdueSpan}</div>
+          <div class="task-meta" style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span style="display:inline-flex;align-items:center;gap:4px;background:${color}22;color:${color};border-radius:6px;padding:2px 7px;font-size:11px;font-weight:600;">${escHtml(label)}</span>
+            ${dlMeta ? `<span style="font-size:11px;color:var(--hint);">${dlMeta}</span>` : ''}
+          </div>
         </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;color:var(--hint);margin-left:6px;"><polyline points="9 18 15 12 9 6"/></svg>
       </div>`;
     }).join('');
 
@@ -1115,6 +1213,102 @@ function escHtml(str) {
     .replace(/</g,'&lt;')
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;');
+}
+
+// ── Task edit sheet ───────────────────────────────────────────────────────────
+
+let _editOrig = null; // task snapshot at open-time for change detection
+
+function openEditSheet(taskId) {
+  el('editTaskId').value = taskId;
+  el('editTitle').value = '';
+  el('editDesc').value = '';
+  el('editStatus').value = 'todo';
+  el('editAssignee').innerHTML = '<option value="">Загрузка…</option>';
+  el('editDeadline').value = '';
+  el('editSaveBtn').disabled = true;
+  _editOrig = null;
+
+  el('editSheet').classList.add('open');
+  el('editBackdrop').classList.add('open');
+
+  Promise.all([
+    fetch(apiBase() + `/v1/tasks/${encodeURIComponent(taskId)}`).then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(d))),
+    fetch(apiBase() + `/v1/workspaces/${encodeURIComponent(tenantId)}/users`).then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(d))),
+  ]).then(([task, usersData]) => {
+    _editOrig = task;
+    el('editTitle').value = task.title || '';
+    el('editDesc').value  = task.description || '';
+    el('editStatus').value = task.status || 'todo';
+    if (task.deadline) el('editDeadline').value = task.deadline.substring(0, 10);
+
+    const sel = el('editAssignee');
+    sel.innerHTML = '<option value="">Не назначен</option>';
+    (usersData.users || []).forEach(u => {
+      const opt = document.createElement('option');
+      opt.value = u.id;
+      opt.textContent = u.full_name + (u.tg_username ? ` (${u.tg_username})` : '');
+      if (u.id === task.assignee_user_id) opt.selected = true;
+      sel.appendChild(opt);
+    });
+
+    el('editSaveBtn').disabled = false;
+  }).catch(e => {
+    closeEditSheet();
+    tg.showAlert('Не удалось загрузить задачу: ' + (e.error || e.message || 'попробуйте ещё раз'));
+  });
+}
+
+function closeEditSheet() {
+  el('editSheet').classList.remove('open');
+  el('editBackdrop').classList.remove('open');
+  _editOrig = null;
+}
+
+async function saveTask() {
+  const taskId = el('editTaskId').value;
+  const btn    = el('editSaveBtn');
+  btn.disabled = true;
+
+  const title = el('editTitle').value.trim();
+  if (!title) {
+    tg.showAlert('Название не может быть пустым.');
+    btn.disabled = false;
+    return;
+  }
+
+  const orig = _editOrig || {};
+  const patch = {};
+
+  if (title !== (orig.title || ''))                               patch.title = title;
+  const desc = el('editDesc').value.trim();
+  if (desc !== (orig.description || ''))                          patch.description = desc;
+  const status = el('editStatus').value;
+  if (status !== (orig.status || ''))                             patch.status = status;
+  const assigneeId = el('editAssignee').value;
+  if (assigneeId !== (orig.assignee_user_id || ''))               patch.assignee_user_id = assigneeId;
+  const dlVal  = el('editDeadline').value;
+  const origDl = orig.deadline ? orig.deadline.substring(0, 10) : '';
+  if (dlVal !== origDl)                                           patch.deadline = dlVal;
+
+  if (Object.keys(patch).length === 0) { closeEditSheet(); return; }
+
+  try {
+    const res = await fetch(apiBase() + `/v1/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${res.status}`);
+    }
+    closeEditSheet();
+    refreshDashboard();
+  } catch (e) {
+    tg.showAlert('Ошибка при сохранении: ' + (e.message || 'попробуйте ещё раз'));
+    btn.disabled = false;
+  }
 }
 </script>
 </body>

@@ -34,13 +34,26 @@ bot.catch((err, ctx) => {
     console.error(`BOT ERROR on update [${ctx?.updateType}]:`, err);
 });
 
-bot.launch({
-    allowedUpdates: ["message", "callback_query", "message_reaction", "my_chat_member"],
-}).then(() => {
-    console.log("Ovra PM-bot успешно запущен!");
-}).catch((err: unknown) => {
-    console.error("Ошибка запуска бота:", err);
-});
+// Поллинг с автоперезапуском. В Telegraf фатальная ошибка поллинга (например,
+// 409 Conflict — гонка со старым процессом, который ещё держит getUpdates до
+// 50 с после рестарта контейнера) реджектит промис launch() и НАВСЕГДА
+// останавливает приём апдейтов, при этом процесс жив (HTTP-сервер держит event
+// loop) — бот выглядит здоровым, но глухой. Поэтому ретраим с нарастающей паузой.
+async function launchBot(attempt = 1): Promise<void> {
+    try {
+        await bot.launch(
+            { allowedUpdates: ["message", "callback_query", "message_reaction", "my_chat_member"] },
+            () => console.log("Ovra PM-bot успешно запущен, поллинг активен."),
+        );
+    } catch (err: any) {
+        const desc = err?.response?.description || err?.message || String(err);
+        const delay = Math.min(60_000, 5_000 * attempt);
+        console.error(`Поллинг упал (попытка ${attempt}): ${desc} — перезапуск через ${delay / 1000} с`);
+        await new Promise((r) => setTimeout(r, delay));
+        return launchBot(attempt + 1);
+    }
+}
+launchBot();
 
 // Плавная остановка
 process.once('SIGINT', () => bot.stop('SIGINT'));

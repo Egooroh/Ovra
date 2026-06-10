@@ -28,6 +28,7 @@ const (
 const (
 	SourceChat    = "chat"
 	SourceMeeting = "meeting"
+	SourceYougile = "yougile"
 )
 
 // Columns maps the four MVP board states to YouGile column IDs.

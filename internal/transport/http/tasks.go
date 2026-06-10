@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ type taskResponse struct {
 	Description    string  `json:"description"`
 	Status         string  `json:"status"`
 	ApprovalStatus string  `json:"approval_status"`
+	AssigneeUserID *string `json:"assignee_user_id,omitempty"`
 	Source         string  `json:"source"`
 	YougileTaskID  *string `json:"yougile_task_id"`
 	Deadline       *string `json:"deadline"`
@@ -90,14 +92,42 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateTaskRequest is the body of PATCH /v1/tasks/{id}.
+// Status-only updates use the task service (YouGile sync included).
+// Full-field updates (title / description / assignee / deadline) only need the repo;
+// if status also changes, the YouGile card is synced as a best-effort step.
+// Pointer fields: nil = don't change; non-nil = apply (empty string = clear).
 type updateTaskRequest struct {
-	Status string `json:"status"`
+	Status         string  `json:"status"`
+	Title          *string `json:"title"`
+	Description    *string `json:"description"`
+	AssigneeUserID *string `json:"assignee_user_id"`
+	Deadline       *string `json:"deadline"` // nil=no-op, ""=clear, else RFC3339/date
 }
 
-// handleUpdateTask changes a task's status and moves its YouGile card.
+// handleGetTask returns a single task by ID.
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
+	id := r.PathValue("id")
+	task, err := s.repo.GetTask(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.log.Error("get task", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, toTaskResponse(task))
+}
+
+// handleUpdateTask changes task fields and optionally moves its YouGile card.
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
-	if s.tasks == nil {
-		writeError(w, http.StatusServiceUnavailable, "task updates disabled: APP_SECRET not set")
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
 		return
 	}
 
@@ -107,17 +137,133 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Status == "" {
-		writeError(w, http.StatusBadRequest, "status is required")
+
+	// Fast path: status-only update delegates to the task service (YouGile sync).
+	if req.Status != "" && req.Title == nil && req.Description == nil && req.AssigneeUserID == nil && req.Deadline == nil {
+		if s.tasks == nil {
+			writeError(w, http.StatusServiceUnavailable, "task updates disabled: APP_SECRET not set")
+			return
+		}
+		task, err := s.tasks.UpdateStatus(r.Context(), id, req.Status)
+		if err != nil {
+			s.writeUpdateTaskError(w, task, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, toTaskResponse(task))
 		return
 	}
 
-	task, err := s.tasks.UpdateStatus(r.Context(), id, req.Status)
+	// Full field update.
+	task, err := s.repo.GetTask(r.Context(), id)
 	if err != nil {
-		s.writeUpdateTaskError(w, task, err)
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.log.Error("get task for update", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	oldStatus := task.Status
+
+	if req.Title != nil {
+		if *req.Title == "" {
+			writeError(w, http.StatusBadRequest, "title cannot be empty")
+			return
+		}
+		task.Title = *req.Title
+	}
+	if req.Description != nil {
+		task.Description = *req.Description
+	}
+	if req.AssigneeUserID != nil {
+		if *req.AssigneeUserID == "" {
+			task.AssigneeUserID = nil
+		} else {
+			uid := *req.AssigneeUserID
+			task.AssigneeUserID = &uid
+		}
+	}
+	if req.Deadline != nil {
+		if *req.Deadline == "" {
+			task.Deadline = nil
+		} else {
+			loc := workspaceLocation("")
+			if ws, wsErr := s.repo.GetWorkspace(r.Context(), task.TenantID); wsErr == nil {
+				loc = workspaceLocation(ws.Timezone)
+			}
+			dl, _, dlErr := parseDeadline(*req.Deadline, loc)
+			if dlErr != nil {
+				writeError(w, http.StatusBadRequest, "deadline must be a date (2006-01-02), datetime or RFC3339")
+				return
+			}
+			task.Deadline = &dl
+		}
+	}
+	if req.Status != "" {
+		switch req.Status {
+		case domain.StatusTodo, domain.StatusInProgress, domain.StatusReview, domain.StatusDone:
+		default:
+			writeError(w, http.StatusBadRequest, "status must be one of: todo, in_progress, review, done")
+			return
+		}
+		task.Status = req.Status
+	}
+
+	task, err = s.repo.UpdateTask(r.Context(), task)
+	if err != nil {
+		s.log.Error("update task fields", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Sync YouGile card column when status changed (best-effort, does not affect response).
+	if req.Status != "" && req.Status != oldStatus {
+		s.syncCardStatus(r.Context(), task, req.Status)
+	}
+
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
+}
+
+// syncCardStatus moves a YouGile card to the column matching status and marks
+// it completed if status == "done". Best-effort: errors are only logged.
+func (s *Server) syncCardStatus(ctx context.Context, task domain.Task, status string) {
+	if s.yg == nil || s.cipher == nil {
+		return
+	}
+	if task.YougileTaskID == nil || *task.YougileTaskID == "" {
+		return
+	}
+	ws, err := s.repo.GetWorkspace(ctx, task.TenantID)
+	if err != nil {
+		return
+	}
+	token, ok := s.loadToken(ctx, task.TenantID)
+	if !ok {
+		return
+	}
+	col := ""
+	switch status {
+	case domain.StatusTodo:
+		col = ws.Columns.Todo
+	case domain.StatusInProgress:
+		col = ws.Columns.InProgress
+	case domain.StatusReview:
+		col = ws.Columns.Review
+	case domain.StatusDone:
+		col = ws.Columns.Done
+	}
+	if col != "" {
+		if err := s.yg.MoveTask(ctx, token, *task.YougileTaskID, col); err != nil {
+			s.log.Warn("syncCardStatus: move", "task_id", task.ID, "err", err)
+		}
+	}
+	if status == domain.StatusDone {
+		if err := s.yg.CompleteTask(ctx, token, *task.YougileTaskID); err != nil {
+			s.log.Warn("syncCardStatus: complete", "task_id", task.ID, "err", err)
+		}
+	}
 }
 
 // writeUpdateTaskError maps an update failure to an HTTP status.
@@ -302,6 +448,7 @@ func toTaskResponse(t domain.Task) taskResponse {
 		Description:    t.Description,
 		Status:         t.Status,
 		ApprovalStatus: t.ApprovalStatus,
+		AssigneeUserID: t.AssigneeUserID,
 		Source:         t.Source,
 		YougileTaskID:  t.YougileTaskID,
 		CreatedAt:      t.CreatedAt.Format(time.RFC3339),

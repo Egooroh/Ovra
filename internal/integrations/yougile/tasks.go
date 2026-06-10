@@ -3,6 +3,7 @@ package yougile
 import (
 	"context"
 	"errors"
+	"net/url"
 	"time"
 )
 
@@ -137,4 +138,32 @@ func (c *Client) TaskExists(ctx context.Context, token, id string) (bool, error)
 // shows the time component (false → date only).
 func DeadlineFromTime(t time.Time, withTime bool) *Deadline {
 	return &Deadline{Deadline: t.UnixMilli(), WithTime: withTime}
+}
+
+// ColumnTask is one task entry returned by ListTasksByColumn.
+type ColumnTask struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	ColumnID  string    `json:"columnId"`
+	Completed bool      `json:"completed"`
+	Archived  bool      `json:"archived"`
+	Deleted   bool      `json:"deleted"`
+	Assigned  []string  `json:"assigned"`
+	Deadline  *Deadline `json:"deadline,omitempty"`
+}
+
+// ListTasksByColumn returns all tasks in the given column. GET /tasks?columnId=...
+func (c *Client) ListTasksByColumn(ctx context.Context, token, columnID string) ([]ColumnTask, error) {
+	if token == "" {
+		return nil, errors.New("yougile: missing token")
+	}
+	if columnID == "" {
+		return nil, errors.New("yougile: missing columnId")
+	}
+	path := "/tasks?columnId=" + url.QueryEscape(columnID)
+	var env listEnvelope[ColumnTask]
+	if err := c.do(ctx, "GET", path, token, nil, &env); err != nil {
+		return nil, err
+	}
+	return env.Content, nil
 }

@@ -8,6 +8,7 @@ import {
     saveYougileCreds, listYougileProjects, setWorkspaceProject, listYougileCompanies,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
     deleteTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    setConfirmMode,
     type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany
 } from "./services/backend.js";
 import crypto from "crypto";
@@ -47,9 +48,37 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
     }
 });
 
+bot.use((ctx, next) => {
+    console.log(`[update] type=${ctx.updateType}`);
+    return next();
+});
+
 let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || undefined;
 
 const recentMessages = new Map<number, string>();
+
+// Кэшируем текст/подпись КАЖДОГО группового сообщения до остальных обработчиков —
+// ранний return в каком-нибудь хендлере не должен оставлять кэш пустым,
+// иначе реакция на такое сообщение не найдёт текст.
+bot.use((ctx, next) => {
+    const msg: any = ctx.message;
+    if (msg && (ctx.chat?.type === 'group' || ctx.chat?.type === 'supergroup')) {
+        const text: string | undefined = msg.text ?? msg.caption;
+        if (text) {
+            recentMessages.set(msg.message_id, text);
+            // Подрезаем старые записи (Map хранит порядок вставки), а не чистим
+            // кэш целиком — свежие сообщения должны переживать переполнение.
+            if (recentMessages.size > 2000) {
+                for (const key of recentMessages.keys()) {
+                    if (recentMessages.size <= 1000) break;
+                    recentMessages.delete(key);
+                }
+            }
+        }
+    }
+    return next();
+});
+
 // Храним задачу вместе с воркспейсом и чатом-источником.
 interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: number; }
 const pendingTasks = new Map<string, PendingTask>();
@@ -132,7 +161,7 @@ function saveMapping() {
 // ------------------------------------------------
 
 function cleanUpCache() {
-    if (recentMessages.size > 1000) recentMessages.clear();
+    // recentMessages подрезается в middleware кэширования (см. выше).
     if (pendingTasks.size > 500) pendingTasks.clear();
 }
 
@@ -235,7 +264,6 @@ bot.command('start', async (ctx) => {
     }
 });
 
-<<<<<<< HEAD
 // continueToProjects — общий переход к выбору проекта после подключения доски.
 async function continueToProjects(ctx: Context, tenant: string) {
     const userId = ctx.from!.id;
@@ -365,10 +393,7 @@ bot.command('setup', async (ctx) => {
     }
 });
 
-async function processTaskAndConfirm(ctx: Context, text: string) {
-=======
 async function processTaskAndConfirm(ctx: Context, text: string, force = false) {
->>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
@@ -766,8 +791,7 @@ bot.on("text", async (ctx, next) => {
     // Команды в группе обрабатываются отдельными bot.command() хендлерами.
     if (message.text.startsWith('/')) return next();
 
-    // Группа: кэшируем.
-    recentMessages.set(message.message_id, message.text);
+    // Кэширование группового текста — в middleware выше (до всех обработчиков).
 
     // Telemost-ссылка в сообщении → планируем созвон без участия PM.
     const telemostUrl = message.text.match(/https?:\/\/telemost\.yandex\.ru\/j\/[^\s]+/)?.[0];
@@ -799,30 +823,55 @@ bot.on("text", async (ctx, next) => {
     }
 });
 
-bot.on("message_reaction", async (ctx) => {
-    const reactionInfo = ctx.messageReaction;
-    const messageId = reactionInfo.message_id;
+// ---- Реакции ✍️/🔥 → задача из сообщения ----
+// ВАЖНО: Telegram присылает message_reaction ТОЛЬКО если бот — администратор
+// группы (любых прав достаточно) и message_reaction указан в allowedUpdates
+// (см. index.ts). Без админки апдейты о реакциях не приходят вовсе: в логах
+// не будет даже строки [update] type=message_reaction.
+const REACTION_TRIGGERS = new Set([
+    '✍',    // ✍ writing hand — Telegram шлёт без variation selector
+    '\u{1F525}', // 🔥 fire
+]);
 
-    const emojis = (reactionInfo.new_reaction || [])
-        .filter((r: any) => r.type === 'emoji')
-        .map((r: any) => r.emoji as string);
-    console.log(`[reaction] msg=${messageId} chat=${(reactionInfo as any).chat?.id} emojis=${JSON.stringify(emojis)} cached=${recentMessages.has(messageId)}`);
+bot.on('message_reaction', async (ctx) => {
+    try {
+        const mr = ctx.messageReaction;
+        const chatId = mr.chat.id;
+        const messageId = mr.message_id;
 
-    // Сравнение без variation selector (✍️ может прийти как ✍ без ️).
-    const hasPinReaction = emojis.some((e) => {
-        const base = e.replace(/️/g, '');
-        return base === '✍' || base === '🔥';
-    });
+        // Эмодзи реакций без variation selector (✍️ → ✍).
+        const emojisOf = (arr: any[] | undefined) =>
+            (arr ?? [])
+                .filter((r: any) => r.type === 'emoji')
+                .map((r: any) => String(r.emoji).replace(/️/g, ''));
 
-    if (!hasPinReaction) return;
+        // Триггерим только на ДОБАВЛЕННЫЕ эмодзи (new минус old) —
+        // снятие или замена чужой реакции задачу не создаёт.
+        const before = new Set(emojisOf((mr as any).old_reaction));
+        const added = emojisOf((mr as any).new_reaction).filter((e) => !before.has(e));
 
-    const text = recentMessages.get(messageId);
-    if (!text) {
-        console.log(`[reaction] msg=${messageId} нет в кэше — сообщение отправлено до рестарта бота или не текстовое`);
-        return;
+        console.log(`[reaction] chat=${chatId} msg=${messageId} added=${JSON.stringify(added)} cached=${recentMessages.has(messageId)}`);
+
+        if (!added.some((e) => REACTION_TRIGGERS.has(e))) return;
+
+        const text = recentMessages.get(messageId);
+        if (!text) {
+            // Кэш в памяти — после рестарта бота тексты старых сообщений недоступны
+            // (message_reaction не содержит текст, а Bot API не умеет читать сообщения задним числом).
+            await ctx.telegram.sendMessage(
+                chatId,
+                '⚠️ Не нашёл текст этого сообщения — бот перезапускался. Отправь сообщение заново и поставь реакцию на новое.',
+                { reply_parameters: { message_id: messageId, allow_sending_without_reply: true } },
+            );
+            return;
+        }
+
+        // Реакция — явное намерение пользователя: force=true создаёт задачу,
+        // даже если ИИ не классифицировал текст как задачу.
+        await processTaskAndConfirm(ctx, text, true);
+    } catch (e) {
+        console.error('[reaction] handler error:', e);
     }
-    // Реакция = явное намерение создать задачу, поэтому force=true.
-    await processTaskAndConfirm(ctx, text, true);
 });
 
 // Создаёт задачу через бэкенд. force=false: при найденных дублях показывает
@@ -988,12 +1037,6 @@ bot.command('confirm', async (ctx) => {
     return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
 });
 
-<<<<<<< HEAD
-async function sendHelp(ctx: Context) {
-    const miniAppLine = MINI_APP_URL
-        ? `👈 *Кнопка «Ovra»* слева от поля ввода — профиль и все доски.\n\n`
-        : ``;
-=======
 // Настройка режима подтверждения задач: только админы или все участники.
 bot.command('confirm_mode', async (ctx) => {
     if (ctx.chat.type === 'private') {
@@ -1071,14 +1114,15 @@ bot.action('cm_everyone', async (ctx) => {
     await ctx.answerCbQuery('Режим обновлён: все участники.');
 });
 
-bot.command('help', async (ctx) => {
->>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
+async function sendHelp(ctx: Context) {
+    const miniAppLine = MINI_APP_URL
+        ? `👈 *Кнопка «Ovra»* слева от поля ввода — профиль и все доски.\n\n`
+        : ``;
     await ctx.reply(
         `🤖 *Ovra* — задачи из чата прямо в YouGile\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         miniAppLine +
         `*Как создать задачу:*\n` +
-<<<<<<< HEAD
         `• Напиши поручение в групповом чате\n` +
         `  _«Нужно сдать отчёт к пятнице» → карточка на подтверждение_\n` +
         `• Поставь реакцию ✍️ или 🔥 на любое сообщение\n` +
@@ -1086,27 +1130,16 @@ bot.command('help', async (ctx) => {
         `*Команды в групповом чате:*\n` +
         `/board — канбан-доска по статусам\n` +
         `/digest — сводка по исполнителям\n` +
+        `/digest\\_time — время ежедневного дайджеста\n` +
         `/sync — синхронизация с YouGile\n` +
         `/trash — корзина (24 ч до удаления)\n` +
         `/setup — подключить или переподключить YouGile\n` +
         `/confirm group|pm — куда приходят подтверждения\n` +
+        `/confirm\\_mode — кто может подтверждать задачи\n` +
         `/calendar — Google / Яндекс Календарь\n` +
         `/bind Имя — привязать @ к аккаунту YouGile\n\n` +
         `*Команды в личке:*\n` +
         `/start — онбординг новой доски\n` +
-=======
-        `• просто напиши поручение в чат (напр. «нужно сделать отчёт к пятнице»)\n` +
-        `• или поставь реакцию ✍️/🔥 на любое сообщение\n` +
-        `→ я пришлю карточку на подтверждение, жми *✅ Одобрить*.\n\n` +
-        `*Команды:*\n` +
-        `/start — назначить эту личку для подтверждений (ПМ)\n` +
-        `/confirm group — подтверждения в группу\n` +
-        `/confirm pm — подтверждения в личку ПМа\n` +
-        `/confirm\\_mode — кто может подтверждать задачи (только в группе)\n` +
-        `/bind Имя Фамилия — привязать твой @ к сотруднику YouGile\n` +
-        `/digest — дайджест открытых задач по исполнителям\n` +
-        `/digest\\_time — настроить время ежедневного дайджеста\n` +
->>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
         `/stats — статус системы\n` +
         `/help — эта справка`,
         { parse_mode: 'Markdown' }
@@ -1557,52 +1590,10 @@ async function sendDigest(ctx: Context) {
 
     try {
         const data = await getDigest(ws.tenant_id);
-<<<<<<< HEAD
-        const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
-            + (data.unassigned?.length ?? 0);
-
-        if (total === 0) {
-            await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
-                '✅ Открытых задач нет — всё чисто!');
-            return;
-        }
-
-        const lines: string[] = [`📋 *Дайджест задач*\n━━━━━━━━━━━━━━━━━━`];
-
-        for (const assignee of data.assignees) {
-            const who = assignee.tg_username
-                ? `*${assignee.full_name}* (${assignee.tg_username})`
-                : `*${assignee.full_name}*`;
-            lines.push(`\n👤 ${who}`);
-            for (const t of assignee.tasks) {
-                const dl = t.deadline
-                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
-                    : '';
-                const status = statusEmoji(t.status);
-                lines.push(`  ${status} ${t.title}${dl}`);
-            }
-        }
-
-        if (data.unassigned?.length) {
-            lines.push(`\n❓ *Без исполнителя*`);
-            for (const t of data.unassigned) {
-                const dl = t.deadline
-                    ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
-                    : '';
-                lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
-            }
-        }
-
-        lines.push(`\n━━━━━━━━━━━━━━━━━━\n_Всего открытых: ${total}_`);
-
-        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
-            lines.join('\n'), { parse_mode: 'Markdown' });
-=======
         const text = formatDigest(data);
 
-        await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined,
+        await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
             text ?? '✅ Открытых задач нет — всё чисто!', { parse_mode: 'Markdown' });
->>>>>>> 7437dcdebd7c1f96e3ed11b892df289d971bdb84
     } catch (e) {
         console.error('digest:', e);
         await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
