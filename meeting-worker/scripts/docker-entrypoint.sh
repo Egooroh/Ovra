@@ -1,8 +1,11 @@
 #!/bin/sh
 set -e
 
-# Clean up stale locks from previous container runs
-rm -f /tmp/.X99-lock /tmp/pulse-* /var/run/pulse/
+# Clean up stale locks from previous container runs.
+# Note: /tmp/pulse-* and /var/run/pulse/ are directories, so this needs -r;
+# with plain `rm -f` the "Is a directory" error is fatal under `set -e` and
+# kills the container on any restart that reuses the previous writable layer.
+rm -rf /tmp/.X99-lock /tmp/pulse-* /var/run/pulse/
 
 # Start virtual display
 Xvfb :99 -screen 0 1280x720x24 -ac &
