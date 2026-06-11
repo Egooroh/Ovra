@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"ovra/internal/domain"
@@ -67,11 +68,21 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Force:       req.Force,
 	}
 	if req.Deadline != "" {
-		// Interpret datetimes without a timezone in the workspace's timezone.
+		// Use assignee's timezone if known, otherwise fall back to workspace timezone.
 		loc := workspaceLocation("")
 		if s.repo != nil {
 			if ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID); err == nil {
 				loc = workspaceLocation(ws.Timezone)
+			}
+			if req.Assignee != "" {
+				if users, err := s.repo.ListUsersByTenant(r.Context(), req.TenantID); err == nil {
+					for _, u := range users {
+						if u.Timezone != "" && userMatchesAssignee(u, req.Assignee) {
+							loc = workspaceLocation(u.Timezone)
+							break
+						}
+					}
+				}
 			}
 		}
 		dl, hasTime, err := parseDeadline(req.Deadline, loc)
@@ -410,6 +421,21 @@ func workspaceLocation(tz string) *time.Location {
 		return loc
 	}
 	return time.UTC
+}
+
+// userMatchesAssignee reports whether u matches the assignee string from the bot
+// (tg_username with/without "@", full name, or first name).
+func userMatchesAssignee(u domain.User, name string) bool {
+	want := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(name)), "@")
+	uname := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(u.TgUsername)), "@")
+	full := strings.ToLower(strings.TrimSpace(u.FullName))
+	if full == want || uname == want {
+		return true
+	}
+	if parts := strings.Fields(full); len(parts) > 0 && parts[0] == want {
+		return true
+	}
+	return false
 }
 
 // parseDeadline accepts a date (2006-01-02), a datetime without timezone

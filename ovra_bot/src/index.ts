@@ -13,6 +13,7 @@ bot.telegram.setMyCommands([
     { command: "bind", description: "Привязать @username к сотруднику YouGile" },
     { command: "digest", description: "Дайджест открытых задач по исполнителям" },
     { command: "digest_time", description: "Настроить время ежедневного дайджеста" },
+    { command: "timezone", description: "Установить мой часовой пояс" },
     { command: "board", description: "Все задачи по статусам (канбан-доска)" },
     { command: "trash", description: "Задачи в корзине (удалятся через 24 ч)" },
     { command: "sync", description: "Синхронизировать задачи с YouGile" },

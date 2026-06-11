@@ -291,14 +291,14 @@ func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, 
 		role = domain.RoleMember
 	}
 	err := p.pool.QueryRow(ctx, `
-		INSERT INTO users (tenant_id, tg_id, tg_username, full_name, yougile_user_id, role)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		INSERT INTO users (tenant_id, tg_id, tg_username, full_name, yougile_user_id, role, timezone)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (tenant_id, tg_id) DO UPDATE SET
 			tg_username     = EXCLUDED.tg_username,
 			full_name       = EXCLUDED.full_name,
 			yougile_user_id = EXCLUDED.yougile_user_id
 		RETURNING id`,
-		u.TenantID, u.TgID, u.TgUsername, u.FullName, u.YougileUserID, role).
+		u.TenantID, u.TgID, u.TgUsername, u.FullName, u.YougileUserID, role, u.Timezone).
 		Scan(&u.ID)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("upsert user: %w", err)
@@ -309,7 +309,7 @@ func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, 
 
 func (p *Postgres) GetUser(ctx context.Context, id string) (domain.User, error) {
 	u, err := scanUser(p.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role, timezone
 		FROM users WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.User{}, ErrNotFound
@@ -323,7 +323,7 @@ func (p *Postgres) GetUser(ctx context.Context, id string) (domain.User, error) 
 // GetUserByTgID looks up a workspace member by their Telegram user id.
 func (p *Postgres) GetUserByTgID(ctx context.Context, tenantID, tgID string) (domain.User, error) {
 	u, err := scanUser(p.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role, timezone
 		FROM users WHERE tenant_id = $1 AND tg_id = $2`, tenantID, tgID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.User{}, ErrNotFound
@@ -376,7 +376,7 @@ func (p *Postgres) DeletePhantomUser(ctx context.Context, tenantID, yougileUserI
 
 func (p *Postgres) ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role, timezone
 		FROM users WHERE tenant_id = $1 ORDER BY full_name`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -626,7 +626,7 @@ func (p *Postgres) DeleteExpiredTasks(ctx context.Context) (int64, error) {
 func (p *Postgres) ListDueReminders(ctx context.Context, within time.Duration) ([]domain.ReminderDue, error) {
 	cutoff := time.Now().Add(within)
 	rows, err := p.pool.Query(ctx, `
-		SELECT t.id, t.tenant_id, t.title, t.deadline, u.tg_id
+		SELECT t.id, t.tenant_id, t.title, t.deadline, u.tg_id, u.timezone
 		FROM tasks t
 		JOIN users u ON u.id = t.assignee_user_id
 		WHERE t.approval_status = 'approved'
@@ -645,7 +645,7 @@ func (p *Postgres) ListDueReminders(ctx context.Context, within time.Duration) (
 	var out []domain.ReminderDue
 	for rows.Next() {
 		var r domain.ReminderDue
-		if err := rows.Scan(&r.TaskID, &r.TenantID, &r.Title, &r.Deadline, &r.AssigneeTgID); err != nil {
+		if err := rows.Scan(&r.TaskID, &r.TenantID, &r.Title, &r.Deadline, &r.AssigneeTgID, &r.AssigneeTimezone); err != nil {
 			return nil, fmt.Errorf("scan due reminder: %w", err)
 		}
 		out = append(out, r)
@@ -685,8 +685,31 @@ func scanTask(r row) (domain.Task, error) {
 
 func scanUser(r row) (domain.User, error) {
 	var u domain.User
-	err := r.Scan(&u.ID, &u.TenantID, &u.TgID, &u.TgUsername, &u.FullName, &u.YougileUserID, &u.Role)
+	err := r.Scan(&u.ID, &u.TenantID, &u.TgID, &u.TgUsername, &u.FullName, &u.YougileUserID, &u.Role, &u.Timezone)
 	return u, err
+}
+
+func (p *Postgres) UpdateUserTimezone(ctx context.Context, tenantID, tgID, timezone string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE users SET timezone = $3 WHERE tenant_id = $1 AND tg_id = $2`,
+		tenantID, tgID, timezone)
+	if err != nil {
+		return fmt.Errorf("update user timezone: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (p *Postgres) UpdateUserTimezoneGlobal(ctx context.Context, tgID, timezone string) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE users SET timezone = $2 WHERE tg_id = $1`,
+		tgID, timezone)
+	if err != nil {
+		return fmt.Errorf("update user timezone global: %w", err)
+	}
+	return nil
 }
 
 // defaultStr returns def when s is empty.

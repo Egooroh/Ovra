@@ -9,7 +9,7 @@ import {
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
     deleteTask, getTask, updateTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
     setPmChatId, setUserRole, listWorkspaceUsers, getUserByTgId,
-    setConfirmMode, updateDigestSettings,
+    setConfirmMode, updateDigestSettings, setUserTimezone,
     type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany, type DigestData
 } from "./services/backend.js";
 import crypto from "crypto";
@@ -1928,9 +1928,10 @@ function formatDigest(data: DigestData): string | null {
             ? `*${assignee.full_name}* (${assignee.tg_username})`
             : `*${assignee.full_name}*`;
         lines.push(`\n👤 ${who}`);
+        const tz = (assignee as any).timezone || 'Europe/Moscow';
         for (const t of assignee.tasks) {
             const dl = t.deadline
-                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU', { timeZone: tz })}`
                 : '';
             lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
         }
@@ -1940,7 +1941,7 @@ function formatDigest(data: DigestData): string | null {
         lines.push(`\n❓ *Без исполнителя*`);
         for (const t of data.unassigned) {
             const dl = t.deadline
-                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
+                ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' })}`
                 : '';
             lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
         }
@@ -1952,14 +1953,15 @@ function formatDigest(data: DigestData): string | null {
 
 // Шлёт напоминание о задаче в личку исполнителю — планировщик (POST /internal/reminder).
 export async function handleReminderDue(
-    payload: { tg_id: string; title: string; deadline: string; overdue: boolean }
+    payload: { tg_id: string; title: string; deadline: string; overdue: boolean; timezone?: string }
 ): Promise<void> {
     const userId = Number(payload.tg_id);
     if (!userId) throw new Error(`invalid tg_id: ${payload.tg_id}`);
 
+    const tz = payload.timezone || 'Europe/Moscow';
     const when = payload.deadline
         ? new Date(payload.deadline).toLocaleString('ru-RU', {
-            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+            timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
         })
         : '—';
 
@@ -2105,6 +2107,48 @@ bot.action('dt_off', async (ctx) => {
         ...digestSettingsKeyboard(time, false),
     }).catch(() => { /* message not modified — игнорируем */ });
     await ctx.answerCbQuery('Дайджест выключен');
+});
+
+// --- Часовой пояс пользователя ---
+
+const TIMEZONE_OPTIONS: Array<{ label: string; iana: string }> = [
+    { label: 'Москва (МСК, UTC+3)',       iana: 'Europe/Moscow' },
+    { label: 'Самара (UTC+4)',             iana: 'Europe/Samara' },
+    { label: 'Екатеринбург (UTC+5)',       iana: 'Asia/Yekaterinburg' },
+    { label: 'Омск (UTC+6)',               iana: 'Asia/Omsk' },
+    { label: 'Красноярск (UTC+7)',         iana: 'Asia/Krasnoyarsk' },
+    { label: 'Иркутск (UTC+8)',            iana: 'Asia/Irkutsk' },
+    { label: 'Якутск (UTC+9)',             iana: 'Asia/Yakutsk' },
+    { label: 'Владивосток (UTC+10)',       iana: 'Asia/Vladivostok' },
+    { label: 'Магадан (UTC+11)',           iana: 'Asia/Magadan' },
+    { label: 'Камчатка (UTC+12)',          iana: 'Asia/Kamchatka' },
+];
+
+bot.command('timezone', async (ctx) => {
+    if (ctx.chat.type !== 'private') {
+        return ctx.reply('Используйте эту команду в личке с ботом.');
+    }
+    const buttons = TIMEZONE_OPTIONS.map(tz =>
+        [Markup.button.callback(tz.label, `tz_set:${tz.iana}`)]
+    );
+    await ctx.reply('🌍 *Выберите ваш часовой пояс:*', {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(buttons),
+    });
+});
+
+bot.action(/^tz_set:(.+)$/, async (ctx) => {
+    const iana = ctx.match[1]!;
+    const userId = ctx.from!.id;
+    await ctx.answerCbQuery('Сохраняю…');
+    try {
+        await setUserTimezone(String(userId), iana);
+        const label = TIMEZONE_OPTIONS.find(t => t.iana === iana)?.label ?? iana;
+        await ctx.editMessageText(`✅ Часовой пояс установлен: *${label}*\n\nТеперь дедлайны и напоминания будут показаны в вашем времени.`, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('tz_set:', e);
+        await ctx.editMessageText('❌ Не удалось сохранить часовой пояс. Попробуйте позже.');
+    }
 });
 
 // Формирует текст и кнопки для сообщения корзины.

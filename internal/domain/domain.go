@@ -73,6 +73,7 @@ type User struct {
 	FullName      string
 	YougileUserID string
 	Role          string // "admin" | "member"
+	Timezone      string // IANA, e.g. "Europe/Moscow"; empty → workspace fallback
 }
 
 // Task is a candidate or approved task; once approved it becomes a YouGile card.
@@ -102,7 +103,8 @@ type ReminderDue struct {
 	TenantID     string
 	Title        string
 	Deadline     time.Time
-	AssigneeTgID string // Telegram user id of the assignee
+	AssigneeTgID      string // Telegram user id of the assignee
+	AssigneeTimezone  string // IANA timezone of the assignee; empty → skip
 }
 
 // Meeting is the source of meeting-derived tasks (transcript/summary).

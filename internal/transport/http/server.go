@@ -66,6 +66,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/users", s.handleListUsers)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/users/by-tg/{tg_id}", s.handleGetUserByTgID)
 	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/users/{tg_id}/role", s.handleSetUserRole)
+	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/users/{tg_id}/timezone", s.handleUpdateUserTimezone)
+	mux.HandleFunc("PATCH /v1/users/{tg_id}/timezone", s.handleUpdateUserTimezoneGlobal)
 	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/pm-chat", s.handleSetPmChat)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)

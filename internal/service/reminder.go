@@ -61,6 +61,7 @@ func (rs *ReminderScheduler) notifyBot(d domain.ReminderDue, overdue bool) bool 
 		"title":    d.Title,
 		"deadline": d.Deadline.Format(time.RFC3339),
 		"overdue":  overdue,
+		"timezone": d.AssigneeTimezone,
 	})
 	if err != nil {
 		rs.log.Error("reminder: marshal", "task", d.TaskID, "err", err)

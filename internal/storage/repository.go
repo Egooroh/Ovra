@@ -46,6 +46,9 @@ type Repository interface {
 	GetUser(ctx context.Context, id string) (domain.User, error)
 	GetUserByTgID(ctx context.Context, tenantID, tgID string) (domain.User, error)
 	SetUserRole(ctx context.Context, tenantID, tgID, role string) error
+	UpdateUserTimezone(ctx context.Context, tenantID, tgID, timezone string) error
+	// UpdateUserTimezoneGlobal sets timezone for all user records with this tg_id across all tenants.
+	UpdateUserTimezoneGlobal(ctx context.Context, tgID, timezone string) error
 	ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error)
 	// DeletePhantomUser removes placeholder users (tg_id LIKE 'yg:%') for the
 	// given yougile_user_id. Called when a real Telegram user registers and

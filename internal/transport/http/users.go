@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
@@ -19,7 +20,8 @@ type registerUserRequest struct {
 	TgUsername    string `json:"tg_username"`
 	FullName      string `json:"full_name"`
 	YougileUserID string `json:"yougile_user_id"`
-	Role          string `json:"role"` // "admin" | "member"; defaults to "member"
+	Role          string `json:"role"`     // "admin" | "member"; defaults to "member"
+	Timezone      string `json:"timezone"` // IANA, e.g. "Europe/Moscow"; optional
 }
 
 // userResponse is the JSON view of a registered user.
@@ -31,6 +33,7 @@ type userResponse struct {
 	FullName      string `json:"full_name"`
 	YougileUserID string `json:"yougile_user_id"`
 	Role          string `json:"role"`
+	Timezone      string `json:"timezone"`
 }
 
 // handleRegisterUser upserts a workspace member (keyed by tenant + tg_id).
@@ -75,6 +78,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		FullName:      req.FullName,
 		YougileUserID: yougileID,
 		Role:          role,
+		Timezone:      req.Timezone,
 	})
 	if err != nil {
 		s.log.Error("upsert user", "tenant", tenant, "err", err)
@@ -197,5 +201,62 @@ func toUserResponse(u domain.User) userResponse {
 		FullName:      u.FullName,
 		YougileUserID: u.YougileUserID,
 		Role:          u.Role,
+		Timezone:      u.Timezone,
 	}
+}
+
+// handleUpdateUserTimezone sets a user's personal IANA timezone (e.g. "Asia/Omsk").
+func (s *Server) handleUpdateUserTimezone(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	tgID := r.PathValue("tg_id")
+	var req struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.Timezone == "" {
+		writeError(w, http.StatusBadRequest, "timezone is required")
+		return
+	}
+	if _, err := time.LoadLocation(req.Timezone); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid IANA timezone: "+req.Timezone)
+		return
+	}
+	if err := s.repo.UpdateUserTimezone(r.Context(), tenant, tgID, req.Timezone); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		s.log.Error("update user timezone", "tenant", tenant, "tg_id", tgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": tgID, "timezone": req.Timezone})
+}
+
+// handleUpdateUserTimezoneGlobal sets timezone for ALL workspaces this user belongs to.
+// Used by the bot when the user sets their timezone in private chat (tenant-agnostic).
+func (s *Server) handleUpdateUserTimezoneGlobal(w http.ResponseWriter, r *http.Request) {
+	tgID := r.PathValue("tg_id")
+	var req struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.Timezone == "" {
+		writeError(w, http.StatusBadRequest, "timezone is required")
+		return
+	}
+	if _, err := time.LoadLocation(req.Timezone); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid IANA timezone: "+req.Timezone)
+		return
+	}
+	if err := s.repo.UpdateUserTimezoneGlobal(r.Context(), tgID, req.Timezone); err != nil {
+		s.log.Error("update user timezone global", "tg_id", tgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": tgID, "timezone": req.Timezone})
 }

@@ -418,12 +418,25 @@ export async function setUserRole(tenantId: string, tgId: string, role: 'admin' 
     }
 }
 
+// Установить часовой пояс пользователя во всех воркспейсах (IANA, например "Asia/Omsk").
+export async function setUserTimezone(tgId: string | number, timezone: string): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/users/${tgId}/timezone`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify({ timezone }),
+    });
+    if (!res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        throw new Error(data.error || `setUserTimezone HTTP ${res.status}`);
+    }
+}
+
 // Получить участника воркспейса по Telegram user id.
-export async function getUserByTgId(tenantId: string, tgId: string | number): Promise<{ id: string; tg_id: string; tg_username: string; full_name: string; role: string } | null> {
+export async function getUserByTgId(tenantId: string, tgId: string | number): Promise<{ id: string; tg_id: string; tg_username: string; full_name: string; role: string; timezone?: string } | null> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users/by-tg/${tgId}`);
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`getUserByTgId HTTP ${res.status}`);
-    return await res.json() as { id: string; tg_id: string; tg_username: string; full_name: string; role: string };
+    return await res.json() as { id: string; tg_id: string; tg_username: string; full_name: string; role: string; timezone?: string };
 }
 
 // Список участников воркспейса (для поиска по username).

@@ -24,6 +24,7 @@ type digestTaskItem struct {
 type digestAssignee struct {
 	FullName   string           `json:"full_name"`
 	TgUsername string           `json:"tg_username"`
+	Timezone   string           `json:"timezone"`
 	Tasks      []digestTaskItem `json:"tasks"`
 }
 
@@ -90,6 +91,7 @@ func (s *Server) handleGetDigest(w http.ResponseWriter, r *http.Request) {
 			assigneeMap[uid] = &digestAssignee{
 				FullName:   u.FullName,
 				TgUsername: u.TgUsername,
+				Timezone:   u.Timezone,
 			}
 		}
 		assigneeMap[uid].Tasks = append(assigneeMap[uid].Tasks, item)
