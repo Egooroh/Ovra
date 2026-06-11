@@ -73,6 +73,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
 	mux.HandleFunc("DELETE /v1/tasks/{id}", s.handleDeleteTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/move-column", s.handleMoveTaskColumn)
+	mux.HandleFunc("GET /v1/workspaces/{tenant}/columns", s.handleListColumns)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/trash", s.handleListTrash)
 	mux.HandleFunc("DELETE /v1/workspaces/{tenant}/trash", s.handleClearTrash)

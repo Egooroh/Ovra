@@ -91,3 +91,88 @@ export function isPotentialTask(text: string): boolean {
 
     return false;
 }
+
+// ── Смена статуса существующей задачи ────────────────────────────────────────
+// Канонические статусы доски — совпадают с domain.* на Go-бэкенде.
+export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'done';
+
+// Многословные фразы-маркеры статуса (ищем подстрокой в нормализованном тексте).
+const STATUS_PHRASES: Array<{ status: TaskStatus; phrases: string[] }> = [
+    // review — «на » впереди отличает от императива «проверь …» (создание задачи).
+    { status: 'review', phrases: ['на ревью', 'на проверку', 'на проверке', 'на согласование', 'на согласовании'] },
+    { status: 'in_progress', phrases: ['в работе', 'в работу', 'в процессе', 'в деле', 'in progress'] },
+    { status: 'todo', phrases: ['в очередь', 'в очереди', 'в бэклог', 'в беклог', 'к выполнению', 'в backlog'] },
+];
+
+// Однословные стемы (сравниваем по началу токена — Cyrillic-safe, без \w).
+const STATUS_STEMS: Array<{ status: TaskStatus; stems: string[] }> = [
+    { status: 'review', stems: ['ревью', 'review'] },
+    { status: 'done', stems: [
+        'готов', 'сделал', 'сделан', 'выполн', 'доделал', 'доделан',
+        'закончил', 'закончен', 'завершил', 'завершен', 'закрыл', 'закрыт',
+        'сдал', 'сдан', 'done', 'finish', 'complete',
+    ] },
+    { status: 'in_progress', stems: ['делаю', 'занимаюсь', 'приступил', 'приступаю', 'started'] },
+    { status: 'todo', stems: ['бэклог', 'беклог', 'backlog', 'todo', 'отложил', 'отложить'] },
+];
+
+// Слова отрицания перед маркером «готово» — «не готово», «ещё не готов», «почти готов».
+const DONE_NEGATIONS = ['не', 'ещене', 'покане', 'почти', 'ещенет', 'нет'];
+
+function normalizeStatusText(text: string): string {
+    return text.toLowerCase().replace(/ё/g, 'е');
+}
+
+function statusTokens(text: string): string[] {
+    return normalizeStatusText(text).split(/[^a-zа-я0-9]+/).filter(Boolean);
+}
+
+// detectStatusChange — извлекает явное намерение сменить статус задачи.
+// Приоритет: review → done → in_progress → todo (review раньше done, чтобы
+// «готово, отправил на проверку» трактовалось как «на ревью»).
+// Перед «готово/сделал» учитываем отрицание: «ещё не готово» → не done.
+// Возвращает null, если маркера статуса нет.
+export function detectStatusChange(text: string): TaskStatus | null {
+    if (!text) return null;
+    const norm = normalizeStatusText(text);
+    const tokens = statusTokens(text);
+
+    // 1. Фразы (review → in_progress → todo).
+    for (const { status, phrases } of STATUS_PHRASES) {
+        if (phrases.some(p => norm.includes(p))) return status;
+    }
+
+    // 2. Стемы по токенам, в порядке приоритета review → done → in_progress → todo.
+    for (const { status, stems } of STATUS_STEMS) {
+        for (let i = 0; i < tokens.length; i++) {
+            const tok = tokens[i]!;
+            if (!stems.some(s => tok.startsWith(s))) continue;
+            // Гасим «done» при отрицании в предыдущем токене.
+            if (status === 'done') {
+                const prev = tokens[i - 1] ?? '';
+                const prev2 = (tokens[i - 2] ?? '') + (tokens[i - 1] ?? '');
+                if (DONE_NEGATIONS.includes(prev) || DONE_NEGATIONS.includes(prev2)) continue;
+            }
+            return status;
+        }
+    }
+
+    return null;
+}
+
+// Глаголы/фразы перемещения задачи в колонку — для дешёвого гейта перед AI
+// (кастомные колонки detectStatusChange не ловит, тут расширяем сеть).
+const MOVE_STEMS = ['перенес', 'перенеш', 'перевед', 'перемест', 'передвин', 'двин', 'помест', 'закин', 'кину', 'кида'];
+const MOVE_PHRASES = ['смени статус', 'сменить статус', 'поставь статус', 'статус на', 'в колонку', 'в колонке'];
+
+// looksLikeStatusOrMove — дешёвый фильтр: похоже ли сообщение на смену
+// статуса/перемещение задачи (канонический маркер ИЛИ глагол перемещения).
+// Используется, чтобы не вызывать AI-матчер на каждом сообщении.
+export function looksLikeStatusOrMove(text: string): boolean {
+    if (!text) return false;
+    if (detectStatusChange(text)) return true;
+    const norm = normalizeStatusText(text);
+    if (MOVE_PHRASES.some(p => norm.includes(p))) return true;
+    const tokens = statusTokens(text);
+    return tokens.some(t => MOVE_STEMS.some(s => t.startsWith(s)));
+}

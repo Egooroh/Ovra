@@ -1,16 +1,17 @@
 // src/bot.ts
 import { Telegraf, Markup, Context } from "telegraf";
-import { isPotentialTask } from "./utils/heuristics.js";
-import { parseMessageWithAI, parseTaskEdit, type ParsedTask } from "./services/ai.js";
+import { isPotentialTask, looksLikeStatusOrMove } from "./utils/heuristics.js";
+import { parseMessageWithAI, parseTaskEdit, pickTaskAndColumn, type ParsedTask } from "./services/ai.js";
 import {
     sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject, listYougileCompanies,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
     deleteTask, getTask, updateTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    listBoardColumns, moveTaskToColumn,
     setPmChatId, setUserRole, listWorkspaceUsers, getUserByTgId,
     setConfirmMode, updateDigestSettings, setUserTimezone,
-    type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany, type DigestData
+    type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany, type DigestData, type BoardTask, type BoardColumn
 } from "./services/backend.js";
 import crypto from "crypto";
 import dotenv from 'dotenv';
@@ -130,6 +131,10 @@ function promoteCardEntry(localId: string, backendId: string) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Маркеры ПРАВКИ полей задачи в ответе на карточку — если они есть, ответ
+// трактуем как редактирование (parseTaskEdit), а не как смену статуса.
+const EDIT_INSTRUCTION_RE = /переименуй|назови|название|заголовок|исполнител|assignee|дедлайн|deadline|срок|описани|добав/i;
 
 // Восстанавливает PendingTask из БД, если он был потерян при рестарте бота.
 // Возвращает null, если задача не найдена или уже не в статусе pending.
@@ -622,6 +627,114 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false, 
     cleanUpCache();
 }
 
+// performColumnMove — проверяет права и двигает карточку в РЕАЛЬНУЮ колонку
+// доски YouGile (включая кастомную), с ответом пользователю. permChatId — чат
+// для проверки прав (всегда группа воркспейса, не личка).
+async function performColumnMove(
+    ctx: Context,
+    permChatId: number | string,
+    tenantId: string,
+    confirmMode: string,
+    task: { id: string; title: string },
+    columnId: string,
+    columns: BoardColumn[],
+): Promise<void> {
+    const userId = ctx.from?.id;
+    if (userId && !(await canManageTasks(permChatId, userId, tenantId, confirmMode))) {
+        await ctx.reply('⛔ Менять статус задач могут администраторы и модераторы (или включите /confirm_mode everyone).');
+        return;
+    }
+    try {
+        const res = await moveTaskToColumn(task.id, columnId);
+        const colTitle = res.column_title || columns.find(c => c.id === columnId)?.title || 'колонку';
+        const emoji = res.status ? statusEmoji(res.status) : '🔀';
+        await ctx.reply(`${emoji} «${task.title}» → *${colTitle}*`, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('[move] moveTaskToColumn:', e);
+        await ctx.reply('❌ Не удалось переместить задачу. Проверьте, что доска подключена к YouGile.');
+    }
+}
+
+// tryHandleTaskMove — распознаёт в свободном тексте/голосовом сообщение о
+// перемещении СУЩЕСТВУЮЩЕЙ задачи («лендинг готов», «отчёт в тестирование»),
+// находит задачу и РЕАЛЬНУЮ колонку доски (любую, не только 4 стоковых статуса)
+// и двигает карточку. Возвращает true, если обработано (тогда разбор «как новой
+// задачи» не нужен). Дешёвый эвристический фильтр впереди — чтобы не дёргать AI
+// на каждом сообщении.
+async function tryHandleTaskMove(ctx: Context, text: string): Promise<boolean> {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return false;
+    if (!looksLikeStatusOrMove(text)) return false; // не похоже на смену статуса
+
+    const ws = await resolveTenant(chatId).catch(() => null);
+    if (!ws || !ws.connected) return false;
+
+    let tasks: BoardTask[];
+    let columns: BoardColumn[];
+    try {
+        [tasks, columns] = await Promise.all([listTasks(ws.tenant_id), listBoardColumns(ws.tenant_id)]);
+    } catch (e) {
+        console.error('[move] fetch tasks/columns:', e);
+        return false;
+    }
+    const open = tasks.filter(t => t.approval_status === 'approved');
+    if (open.length === 0 || columns.length === 0) return false;
+
+    const pick = await pickTaskAndColumn(
+        text,
+        open.map(t => ({ title: t.title, status: t.status })),
+        columns.map(c => ({ id: c.id, title: c.title })),
+    );
+    if (!pick) return false;
+
+    const task = open[pick.taskIndex];
+    if (!task) return false;
+
+    await performColumnMove(ctx, ws.chat_id || chatId, ws.tenant_id, ws.confirm_mode ?? 'admin_only', task, pick.columnId, columns);
+    return true;
+}
+
+// handleReplyMove — перемещение задачи ОТВЕТОМ на её карточку. Задача уже
+// известна (taskId), AI выбирает только целевую колонку из реальных колонок доски.
+async function handleReplyMove(ctx: Context, replyText: string, chatId: number, taskId: string): Promise<void> {
+    const dbTask = await getTask(taskId).catch(() => null);
+    if (!dbTask) {
+        await ctx.telegram.sendMessage(chatId, '⚠️ Задача не найдена.');
+        return;
+    }
+    let columns: BoardColumn[];
+    try {
+        columns = await listBoardColumns(dbTask.tenant_id);
+    } catch (e) {
+        console.error('[move] reply listBoardColumns:', e);
+        await ctx.telegram.sendMessage(chatId, '❌ Не удалось получить колонки доски YouGile.');
+        return;
+    }
+    if (columns.length === 0) {
+        await ctx.telegram.sendMessage(chatId, '❌ На доске не найдено колонок.');
+        return;
+    }
+    const pick = await pickTaskAndColumn(
+        replyText,
+        [{ title: dbTask.title, status: dbTask.status }],
+        columns.map(c => ({ id: c.id, title: c.title })),
+    );
+    if (!pick) {
+        await ctx.telegram.sendMessage(chatId, 'ℹ️ Не понял, в какую колонку переместить. Назовите статус или колонку точнее.');
+        return;
+    }
+    const ws = await getWorkspaceInfo(dbTask.tenant_id).catch(() => null);
+    await performColumnMove(
+        ctx,
+        ws?.chat_id || chatId,
+        dbTask.tenant_id,
+        ws?.confirm_mode ?? 'admin_only',
+        { id: taskId, title: dbTask.title },
+        pick.columnId,
+        columns,
+    );
+}
+
 // ---- Управление календарями ----
 
 function calendarMenuKeyboard(tenant: string) {
@@ -833,14 +946,28 @@ bot.on('voice', async (ctx) => {
         const resp = await fetch(link.href, { signal: AbortSignal.timeout(30_000) });
         if (!resp.ok) {
             console.error(`[voice] download failed: ${resp.status}`);
+            await ctx.reply('⚠️ Не смог скачать голосовое из Telegram. Попробуйте ещё раз.', {
+                reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true },
+            });
             return;
         }
 
         const buffer = Buffer.from(await resp.arrayBuffer());
         const text = await transcribeOgg(buffer);
-        if (!text) return;
+        // Раньше пустой результат глушился молча — со стороны выглядело как «бот
+        // не реагирует на голосовые». Теперь явно сообщаем о неудаче распознавания.
+        if (!text) {
+            console.warn(`[voice] msg_id=${ctx.message.message_id} transcription empty/failed`);
+            await ctx.reply('⚠️ Не смог распознать голосовое. Скажите чуть чётче (и до 30 сек).', {
+                reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true },
+            });
+            return;
+        }
 
         console.log(`[voice] msg_id=${ctx.message.message_id} text="${text}"`);
+        // Сначала пробуем как смену статуса существующей задачи («лендинг готов»),
+        // и только потом — как новую задачу.
+        if (await tryHandleTaskMove(ctx, text)) return;
         await processTaskAndConfirm(ctx, text);
     } catch (e) {
         console.error('[voice] handler error:', e);
@@ -917,6 +1044,19 @@ bot.use(async (ctx, next) => {
     const cardKey = `${chatId}:${replyMsgId}`;
     const taskId = cardMessages.get(cardKey);
     if (!taskId) return next();
+
+    // Ответ-перемещение карточки («смени на в работе», «готово», «в тестирование»).
+    // Гасим, если в тексте есть явный маркер ПРАВКИ полей (переименуй/дедлайн/…),
+    // чтобы «переименуй в "X готово"» не трактовалось как смена статуса.
+    if (looksLikeStatusOrMove(msg.text) && !EDIT_INSTRUCTION_RE.test(msg.text)) {
+        if (UUID_RE.test(taskId)) {
+            await handleReplyMove(ctx, msg.text, chatId, taskId);
+        } else {
+            // Задача ещё не одобрена (нет карточки в YouGile) — статус менять рано.
+            await ctx.telegram.sendMessage(chatId, 'ℹ️ Задача ещё не создана — сначала нажмите ✅, потом можно менять статус.', { reply_parameters: { message_id: msg.message_id } });
+        }
+        return;
+    }
 
     // UUID в cardMessages → задача уже одобрена, редактируем через API напрямую.
     if (UUID_RE.test(taskId)) {
@@ -1122,6 +1262,10 @@ bot.on("text", async (ctx, next) => {
         return;
     }
 
+    // Смена статуса существующей задачи («лендинг готов», «беру X в работу»).
+    // Проверяем ДО эвристического фильтра задач — фразы статуса его не проходят.
+    if (await tryHandleTaskMove(ctx, message.text)) return;
+
     // Режим детекции: 'ai' — каждое сообщение в AI, 'heuristic' — сначала фильтр.
     const ws = await resolveTenant(ctx.chat.id).catch(() => null);
     const detectionMode = ws?.task_detection ?? 'heuristic';
@@ -1211,6 +1355,26 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
     const deadline = taskData.deadline || "";
 
     const result = await sendTaskToOvraBackend(pending.tenantId, title, assignee, description, deadline, force);
+
+    // Частичный сбой: задача сохранена, но YouGile долго отвечал — карточка МОГЛА
+    // создаться. Раньше это показывалось как «❌ не удалось создать», и человек
+    // отправлял повторно → дубль. Теперь честно предупреждаем и просим не дублировать.
+    if (result.partial) {
+        pendingTasks.delete(taskId);
+        clearCardEntry(taskId);
+        if (pending.originChatId) {
+            lastConfirmedTask.set(pending.originChatId, { title, ts: Date.now() });
+        }
+        await ctx.editMessageText(
+            `⚠️ *YouGile долго ответил*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `📌 *${title}*\n\n` +
+            `Задача сохранена, карточка, скорее всего, уже создана — проверьте доску.\n` +
+            `❗️ Не отправляйте повторно, чтобы не задвоить (при необходимости синхронизируйте: /sync).`,
+            { parse_mode: 'Markdown' },
+        );
+        return;
+    }
 
     // Найдены похожие задачи — спрашиваем хоста, добавлять ли всё равно.
     if (result.isDuplicate && !force) {
@@ -1465,6 +1629,10 @@ async function sendHelp(ctx: Context) {
         `  _«Нужно сдать отчёт к пятнице» → карточка на подтверждение_\n` +
         `• Поставь реакцию ✍️ или 🔥 на любое сообщение\n` +
         `• Нажми *✅ Одобрить* — задача уйдёт в YouGile\n\n` +
+        `*Как сменить статус / колонку задачи:*\n` +
+        `• Ответь на карточку задачи: «в работе», «готово», «в тестирование»\n` +
+        `• Или напиши/наговори голосом: _«лендинг готов»_, _«отчёт в согласование»_\n` +
+        `  _(работает с любыми колонками вашей доски, не только стандартными)_\n\n` +
         `*Команды в групповом чате:*\n` +
         `/board — канбан-доска по статусам\n` +
         `/digest — сводка по исполнителям\n` +

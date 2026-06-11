@@ -47,6 +47,17 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) { c.http = h }
 }
 
+// WithTimeout overrides the HTTP client timeout. A too-short timeout through a
+// slow proxy/tunnel makes POST /tasks report failure even though YouGile already
+// created the card (the POST is not retried — see retryableTransport).
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.http.Timeout = d
+		}
+	}
+}
+
 // New builds a Client with sensible defaults.
 func New(opts ...Option) *Client {
 	c := &Client{

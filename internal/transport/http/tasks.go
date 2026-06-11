@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ovra/internal/columns"
 	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
 	"ovra/internal/service"
@@ -405,6 +406,190 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
+}
+
+// columnView is the JSON view of one live board column.
+type columnView struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"` // best-effort canonical status, "" if unmapped
+}
+
+// handleListColumns returns the workspace board's live columns (id, title and
+// the best-effort canonical status each maps to). Lets the bot move tasks to ANY
+// custom column by its real name, not just the four canonical statuses.
+func (s *Server) handleListColumns(w http.ResponseWriter, r *http.Request) {
+	if s.cipher == nil || s.yg == nil {
+		writeError(w, http.StatusServiceUnavailable, "columns unavailable: APP_SECRET/YouGile not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	ws, err := s.repo.GetWorkspace(r.Context(), tenant)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace for columns", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	token, ok := s.workspaceToken(w, r, tenant)
+	if !ok {
+		return
+	}
+
+	cols, _, err := s.boardColumns(r.Context(), token, ws.YougileProjectID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
+		return
+	}
+
+	statusByCol := canonicalStatusMap(ws, cols)
+	out := make([]columnView, len(cols))
+	for i, c := range cols {
+		out[i] = columnView{ID: c.ID, Title: c.Title, Status: statusByCol[c.ID]}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"columns": out})
+}
+
+// moveColumnRequest is the body of POST /v1/tasks/{id}/move-column.
+type moveColumnRequest struct {
+	ColumnID string `json:"column_id"`
+}
+
+// handleMoveTaskColumn moves a task's YouGile card to an arbitrary board column
+// (by id), supporting custom columns beyond the four canonical statuses. The
+// local status is updated to the column's best-effort canonical mapping so the
+// digest/board stay roughly consistent; a card in done-mapped column is completed.
+func (s *Server) handleMoveTaskColumn(w http.ResponseWriter, r *http.Request) {
+	if s.repo == nil || s.yg == nil || s.cipher == nil {
+		writeError(w, http.StatusServiceUnavailable, "column move disabled: APP_SECRET/YouGile not configured")
+		return
+	}
+	id := r.PathValue("id")
+	var req moveColumnRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ColumnID == "" {
+		writeError(w, http.StatusBadRequest, "column_id is required")
+		return
+	}
+
+	task, err := s.repo.GetTask(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.log.Error("get task for move", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if task.YougileTaskID == nil || *task.YougileTaskID == "" {
+		writeError(w, http.StatusConflict, "task has no YouGile card yet")
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), task.TenantID)
+	if err != nil {
+		s.log.Error("get workspace for move", "task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	token, ok := s.loadToken(r.Context(), task.TenantID)
+	if !ok {
+		writeError(w, http.StatusConflict, "workspace is not connected to YouGile")
+		return
+	}
+
+	cols, _, err := s.boardColumns(r.Context(), token, ws.YougileProjectID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
+		return
+	}
+	title := ""
+	for _, c := range cols {
+		if c.ID == req.ColumnID {
+			title = c.Title
+			break
+		}
+	}
+	if title == "" {
+		writeError(w, http.StatusNotFound, "column not found on the board")
+		return
+	}
+
+	if err := s.yg.MoveTask(r.Context(), token, *task.YougileTaskID, req.ColumnID); err != nil {
+		writeError(w, http.StatusBadGateway, "yougile: move card: "+err.Error())
+		return
+	}
+
+	canonical := canonicalStatusMap(ws, cols)[req.ColumnID]
+	if canonical == domain.StatusDone {
+		if err := s.yg.CompleteTask(r.Context(), token, *task.YougileTaskID); err != nil {
+			s.log.Warn("move column: complete", "task_id", task.ID, "err", err)
+		}
+	}
+	if canonical != "" && canonical != task.Status {
+		task.Status = canonical
+		if t, uErr := s.repo.UpdateTask(r.Context(), task); uErr == nil {
+			task = t
+		} else {
+			s.log.Warn("move column: update local status", "task_id", task.ID, "err", uErr)
+		}
+	}
+
+	s.log.Info("task moved to column", "task_id", task.ID, "column", req.ColumnID, "status", canonical)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task":         toTaskResponse(task),
+		"column_id":    req.ColumnID,
+		"column_title": title,
+		"status":       canonical,
+	})
+}
+
+// boardColumns lists the columns of the workspace project's first board.
+func (s *Server) boardColumns(ctx context.Context, token, projectID string) ([]yougile.Column, string, error) {
+	boards, err := s.yg.ListBoards(ctx, token, projectID)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(boards) == 0 {
+		return nil, "", errors.New("no boards in the workspace project")
+	}
+	cols, err := s.yg.ListColumns(ctx, token, boards[0].ID)
+	if err != nil {
+		return nil, "", err
+	}
+	return cols, boards[0].ID, nil
+}
+
+// canonicalStatusMap maps each board column id to a canonical status. The stored
+// workspace mapping wins for the four mapped columns; the dictionary classifies
+// the rest (custom columns with no synonym stay "").
+func canonicalStatusMap(ws domain.Workspace, cols []yougile.Column) map[string]string {
+	m := make(map[string]string, len(cols))
+	for _, a := range columns.Resolve(cols).Assignments {
+		m[a.ColumnID] = a.Status
+	}
+	if ws.Columns.Todo != "" {
+		m[ws.Columns.Todo] = domain.StatusTodo
+	}
+	if ws.Columns.InProgress != "" {
+		m[ws.Columns.InProgress] = domain.StatusInProgress
+	}
+	if ws.Columns.Review != "" {
+		m[ws.Columns.Review] = domain.StatusReview
+	}
+	if ws.Columns.Done != "" {
+		m[ws.Columns.Done] = domain.StatusDone
+	}
+	return m
 }
 
 // handleListTasks returns the tasks of a workspace (for the digest, FR-7).

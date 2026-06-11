@@ -19,12 +19,16 @@ export interface DuplicateTask {
 
 // 1. Описываем, что именно мы ожидаем от Go-бэкенда
 export interface OvraBackendResponse {
+    id?: string;
     yougile_task_id?: string;
     status?: string;
     error?: string;
     // Если бэкенд нашёл дубли (HTTP 409) — заполняется и выставляется isDuplicate.
     isDuplicate?: boolean;
     duplicates?: DuplicateTask[];
+    // HTTP 502 «task saved but YouGile card failed» — задача сохранена, но YouGile
+    // долго отвечал (карточка МОГЛА создаться). Не считаем это провалом создания.
+    partial?: boolean;
 }
 
 // 2. Отправка задачи в конкретный воркспейс. force=true — в обход дедупликации.
@@ -64,6 +68,13 @@ export async function sendTaskToOvraBackend(
         // чтобы спросить у пользователя, добавлять ли всё равно.
         if (response.status === 409 && Array.isArray((data as any).duplicates)) {
             return { ...(data as OvraBackendResponse), isDuplicate: true };
+        }
+
+        // 502 с телом task — задача сохранена, но карточка YouGile не подтверждена
+        // (таймаут/долгий ответ). Карточка могла создаться — это НЕ провал создания.
+        if (response.status === 502 && (data as any).task) {
+            const t = (data as any).task;
+            return { partial: true, id: t.id, yougile_task_id: t.yougile_task_id ?? undefined, status: t.status };
         }
 
         if (!response.ok) {
@@ -175,11 +186,15 @@ export async function updateTask(taskId: string, patch: {
     title?: string;
     description?: string;
     deadline?: string;
+    status?: string;
 }): Promise<void> {
     const body: Record<string, string> = {};
     if (patch.title !== undefined) body.title = patch.title;
     if (patch.description !== undefined) body.description = patch.description;
     if (patch.deadline !== undefined) body.deadline = patch.deadline;
+    // status-only PATCH идёт по быстрому пути на бэкенде (UpdateStatus + синк
+    // колонки в YouGile); смешивать со сменой полей не нужно.
+    if (patch.status !== undefined) body.status = patch.status;
     const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
@@ -241,6 +256,38 @@ export async function listTasks(tenantId: string): Promise<BoardTask[]> {
     if (!res.ok) throw new Error(`listTasks HTTP ${res.status}`);
     const data: any = await res.json();
     return (data.tasks || []) as BoardTask[];
+}
+
+// Колонка доски YouGile (реальная, включая кастомные). status — лучшее
+// каноническое приближение ("" если колонка не маппится ни в один из 4 статусов).
+export interface BoardColumn {
+    id: string;
+    title: string;
+    status: string;
+}
+
+// Живой список колонок доски воркспейса (для матчинга названия из текста/голоса).
+export async function listBoardColumns(tenantId: string): Promise<BoardColumn[]> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/columns`);
+    if (!res.ok) throw new Error(`listBoardColumns HTTP ${res.status}`);
+    const data: any = await res.json();
+    return (data.columns || []) as BoardColumn[];
+}
+
+// Переместить карточку задачи в произвольную колонку доски (по её id).
+// Возвращает реальное название колонки и каноническое приближение статуса.
+export async function moveTaskToColumn(taskId: string, columnId: string): Promise<{ column_title: string; status: string }> {
+    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}/move-column`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify({ column_id: columnId }),
+    });
+    if (!res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        throw new Error(data.error || `moveTaskToColumn HTTP ${res.status}`);
+    }
+    const data: any = await res.json();
+    return { column_title: data.column_title ?? '', status: data.status ?? '' };
 }
 
 export async function syncWorkspace(tenantId: string): Promise<SyncResult> {

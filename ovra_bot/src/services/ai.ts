@@ -101,6 +101,64 @@ export async function parseTaskEdit(current: ParsedTask, editText: string): Prom
     }
 }
 
+// pickTaskAndColumn решает, к какой из СУЩЕСТВУЮЩИХ задач относится сообщение о
+// перемещении («лендинг готов», «беру дизайн в работу», «отчёт в тестирование»)
+// и в какую РЕАЛЬНУЮ колонку доски его двигать — включая кастомные колонки
+// («Тестирование», «Согласование», «Заблокировано»…). AI видит настоящие
+// названия колонок и сам сопоставляет фразу с нужной. Вызывается только после
+// дешёвого эвристического фильтра (looksLikeStatusOrMove) — чтобы не дёргать AI
+// на каждом сообщении. Возвращает индекс задачи + id колонки, либо null.
+export async function pickTaskAndColumn(
+    text: string,
+    tasks: { title: string; status: string }[],
+    columns: { id: string; title: string }[],
+): Promise<{ taskIndex: number; columnId: string } | null> {
+    if (tasks.length === 0 || columns.length === 0) return null;
+
+    const taskList = tasks.map((t, i) => `${i + 1}. "${t.title}"`).join('\n');
+    const colList = columns.map((c, i) => `${i + 1}. "${c.title}"`).join('\n');
+
+    const systemPrompt = `Пользователь в рабочем чате сообщает о ПЕРЕМЕЩЕНИИ существующей задачи в колонку доски. Примеры: «лендинг готов», «беру дизайн в работу», «отчёт отправил на тестирование», «карточку X в согласование».
+
+Тебе даны:
+- пронумерованный список существующих ЗАДАЧ;
+- пронумерованный список реальных КОЛОНОК доски (статусы могут быть нестандартными);
+- сообщение пользователя.
+
+Определи, какую задачу и в какую колонку нужно переместить. Сопоставляй по смыслу: «готово/сделал» → колонка завершения; «в работу/делаю» → колонка работы; «на проверку/ревью/тест» → соответствующая колонка; и т.п. Если в доске есть колонка с подходящим названием — выбирай её.
+
+Верни ТОЛЬКО JSON без markdown:
+{"task": <номер задачи 1..N>, "column": <номер колонки 1..M>}
+
+Если это НЕ перемещение задачи из списка, либо непонятно какая задача/колонка — верни {"task": 0}.`;
+
+    const userPrompt = `ЗАДАЧИ:\n${taskList}\n\nКОЛОНКИ:\n${colList}\n\nСообщение: "${text}"`;
+
+    try {
+        const completion = await openai.chat.completions.create({
+            model: process.env.AI_MODEL || "mistralai/mistral-7b-instruct:free",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+            ],
+            max_tokens: 64,
+        });
+        let raw = completion.choices[0]?.message?.content?.trim() ?? '{}';
+        raw = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(raw);
+
+        const ti = Number(parsed.task);
+        const ci = Number(parsed.column);
+        if (!Number.isInteger(ti) || ti < 1 || ti > tasks.length) return null;
+        if (!Number.isInteger(ci) || ci < 1 || ci > columns.length) return null;
+
+        return { taskIndex: ti - 1, columnId: columns[ci - 1]!.id };
+    } catch (e) {
+        console.error('pickTaskAndColumn error:', e);
+        return null;
+    }
+}
+
 export async function parseMessageWithAI(message: string, context: string[] = []): Promise<ParsedTask[]> {
     try {
         console.log("⏳ Отправляю запрос в OpenRouter...");

@@ -76,6 +76,19 @@ func main() {
 	if base := os.Getenv("YOUGILE_BASE_URL"); base != "" {
 		ygOpts = append(ygOpts, yougile.WithBaseURL(base))
 	}
+	// Через корпоративный прокси/туннель YouGile иногда отвечает дольше дефолтных
+	// 15с: POST /tasks при таймауте НЕ ретраится (чтобы не задвоить карточку),
+	// поэтому слишком короткий таймаут приводит к «карточка создана, а бот пишет
+	// ошибку». 30с по умолчанию; переопределяется YOUGILE_HTTP_TIMEOUT (напр. "45s").
+	ygTimeout := 30 * time.Second
+	if v := os.Getenv("YOUGILE_HTTP_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			ygTimeout = d
+		} else {
+			log.Warn("invalid YOUGILE_HTTP_TIMEOUT, using default", "value", v)
+		}
+	}
+	ygOpts = append(ygOpts, yougile.WithTimeout(ygTimeout))
 	yg := yougile.New(ygOpts...)
 
 	// Task publisher needs the cipher to decrypt per-workspace tokens; without
