@@ -646,7 +646,10 @@ async function performColumnMove(
     }
     try {
         const res = await moveTaskToColumn(task.id, columnId);
-        const colTitle = res.column_title || columns.find(c => c.id === columnId)?.title || 'колонку';
+        // Название колонки: для стандартных статусов — чистый русский лейбл (имена
+        // колонок YouGile иногда приходят в битой кодировке), для кастомных — как есть.
+        const rawTitle = res.column_title || columns.find(c => c.id === columnId)?.title || '';
+        const colTitle = (res.status && statusLabel(res.status)) || rawTitle || 'колонку';
         // Эмодзи под цвет колонки YouGile; если цвет неизвестен — откат на
         // канонический статус-эмодзи, затем на нейтральный 🔀.
         const colColor = res.column_color || columns.find(c => c.id === columnId)?.color || 0;
