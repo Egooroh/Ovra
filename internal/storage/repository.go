@@ -36,11 +36,22 @@ type Repository interface {
 	SetDigestSettings(ctx context.Context, tenantID string, enabled bool, digestTime string) error
 	// SetConfirmMode updates the task-confirmation mode for a workspace.
 	SetConfirmMode(ctx context.Context, tenantID string, mode string) error
+	// SetWorkspacePmChatId stores the private-chat ID that receives confirmation cards.
+	SetWorkspacePmChatId(ctx context.Context, tenantID, pmChatID string) error
 
 	// Users.
 	UpsertUser(ctx context.Context, u domain.User) (domain.User, error)
 	GetUser(ctx context.Context, id string) (domain.User, error)
+	GetUserByTgID(ctx context.Context, tenantID, tgID string) (domain.User, error)
+	SetUserRole(ctx context.Context, tenantID, tgID, role string) error
 	ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error)
+	// DeletePhantomUser removes placeholder users (tg_id LIKE 'yg:%') for the
+	// given yougile_user_id. Called when a real Telegram user registers and
+	// their YouGile account is already known, to avoid duplicate entries.
+	DeletePhantomUser(ctx context.Context, tenantID, yougileUserID string) error
+	// SetUserYougileBinding updates (or clears) the yougile_user_id for a
+	// workspace member. An empty yougileUserID removes the binding.
+	SetUserYougileBinding(ctx context.Context, tenantID, tgID, yougileUserID string) error
 
 	// Tasks (CRUD).
 	CreateTask(ctx context.Context, t domain.Task) (domain.Task, error)

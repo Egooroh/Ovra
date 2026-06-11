@@ -64,7 +64,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role := req.Role
-	if role != domain.RoleAdmin && role != domain.RoleMember {
+	if role != domain.RoleAdmin && role != domain.RoleModerator && role != domain.RoleMember {
 		role = domain.RoleMember
 	}
 
@@ -81,6 +81,14 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	// Remove any YouGile-sync placeholder that shares the same yougile_user_id.
+	if yougileID != "" {
+		if err := s.repo.DeletePhantomUser(r.Context(), tenant, yougileID); err != nil {
+			s.log.Warn("delete phantom user", "tenant", tenant, "yougile_id", yougileID, "err", err)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, toUserResponse(u))
 }
 
@@ -133,6 +141,51 @@ func (s *Server) loadToken(ctx context.Context, tenant string) (string, bool) {
 		return "", false
 	}
 	return token, true
+}
+
+// handleGetUserByTgID looks up a workspace member by their Telegram user id.
+func (s *Server) handleGetUserByTgID(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	tgID := r.PathValue("tg_id")
+	u, err := s.repo.GetUserByTgID(r.Context(), tenant, tgID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		s.log.Error("get user by tg_id", "tenant", tenant, "tg_id", tgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserResponse(u))
+}
+
+// handleSetUserRole updates the Ovra role (admin/member) of a workspace member.
+// The caller must be a workspace admin or the host — enforced by the bot; the
+// endpoint is internal so we trust the caller's role check.
+func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	tgID := r.PathValue("tg_id")
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.Role != domain.RoleAdmin && req.Role != domain.RoleModerator && req.Role != domain.RoleMember {
+		writeError(w, http.StatusBadRequest, `role must be "admin", "moderator" or "member"`)
+		return
+	}
+	if err := s.repo.SetUserRole(r.Context(), tenant, tgID, req.Role); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found in workspace")
+			return
+		}
+		s.log.Error("set user role", "tenant", tenant, "tg_id", tgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": tgID, "role": req.Role})
 }
 
 func toUserResponse(u domain.User) userResponse {

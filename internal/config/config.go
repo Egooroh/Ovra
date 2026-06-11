@@ -37,6 +37,10 @@ type Config struct {
 	// Authorization: Bearer <token> when POSTing to /v1/meetings/summary.
 	// Empty → auth is skipped (dev/testing only).
 	WorkerSecret string
+	// BotSecret is the shared token that the Telegram bot includes in
+	// Authorization: Bearer <token> for every /v1/* mutating request.
+	// Empty → auth is skipped (dev/testing only).
+	BotSecret string
 	// MeetingWorkerURL is the base URL of the TS meeting-worker management API,
 	// e.g. http://meeting-worker:3001. Used to forward Telemost links for scheduling.
 	// Empty → the /v1/workspaces/{tenant}/calls endpoint returns 503.
@@ -76,6 +80,7 @@ func Load() (*Config, error) {
 		OpenRouterBaseURL: os.Getenv("OPENROUTER_BASE_URL"),
 		DedupThreshold:   envFloat("DEDUP_SIMILARITY", 0.4),
 		WorkerSecret:     os.Getenv("WORKER_SECRET"),
+		BotSecret:        os.Getenv("BOT_SECRET"),
 		MeetingWorkerURL: os.Getenv("MEETING_WORKER_URL"),
 		BotInternalURL:   os.Getenv("BOT_INTERNAL_URL"),
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),

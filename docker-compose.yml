@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ovra
       POSTGRES_DB: ovra
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,6 +26,7 @@ services:
       WORKSPACE_CONFIG: "/app/workspace.yaml"
       YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
       APP_SECRET: "${APP_SECRET:-dev-only-change-me}"
+      BOT_SECRET: "${BOT_SECRET:-}"
       # Optional AI column classifier — set OPENROUTER_API_KEY to enable.
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
@@ -108,8 +109,10 @@ services:
       # а не localhost (это значение важнее того, что лежит в .env бота).
       BACKEND_URL: "http://app:8080"
       DEADLINE_TZ: "${DEADLINE_TZ:-Europe/Moscow}"
-      # Публичный URL мини-аппа для web_app кнопок (должен быть HTTPS).
       MINI_APP_URL: "${MINI_APP_URL:-}"
+      BOT_SECRET: "${BOT_SECRET:-}"
+    volumes:
+      - bot_data:/app/data
     # PROXY_URL в .env бота должен указывать на host.docker.internal (а не 127.0.0.1),
     # чтобы из контейнера дотянуться до прокси на хост-машине.
     extra_hosts:
@@ -119,3 +122,4 @@ services:
 volumes:
   pgdata:
   meeting_output:
+  bot_data:

@@ -8,5 +8,7 @@ RUN npm install
 
 COPY . .
 
+RUN mkdir -p /app/data
+
 # Бот работает на long-polling Telegram — входящий порт не нужен.
 CMD ["npm", "start"]

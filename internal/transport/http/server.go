@@ -64,6 +64,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/debug/boards", s.handleDebugBoards)
 	mux.HandleFunc("POST /v1/workspaces/{tenant}/users", s.handleRegisterUser)
 	mux.HandleFunc("GET /v1/workspaces/{tenant}/users", s.handleListUsers)
+	mux.HandleFunc("GET /v1/workspaces/{tenant}/users/by-tg/{tg_id}", s.handleGetUserByTgID)
+	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/users/{tg_id}/role", s.handleSetUserRole)
+	mux.HandleFunc("PATCH /v1/workspaces/{tenant}/pm-chat", s.handleSetPmChat)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", s.handleUpdateTask)
@@ -89,8 +92,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /miniapp/connect", s.handleMiniAppConnect)
 	mux.HandleFunc("POST /miniapp/workspaces", s.handleMiniAppWorkspaces)
 	mux.HandleFunc("POST /miniapp/companies", s.handleMiniAppCompanies)
-	// Outermost first: recover panics, then log every request.
-	return s.recoverPanic(s.requestLogger(mux))
+	mux.HandleFunc("POST /miniapp/set-role", s.handleMiniAppSetRole)
+	mux.HandleFunc("POST /miniapp/bind-user", s.handleMiniAppBindUser)
+	mux.HandleFunc("POST /miniapp/update-task", s.handleMiniAppUpdateTask)
+	// Outermost first: recover panics → log → enforce bot secret on /v1/* writes.
+	return s.recoverPanic(s.requestLogger(s.requireBotSecret(mux)))
 }
 
 // handleHealthz reports liveness and how many tenants are loaded.

@@ -30,6 +30,7 @@ type workspaceResponse struct {
 	DigestEnabled    bool   `json:"digest_enabled"`
 	DigestTime       string `json:"digest_time"`
 	ConfirmMode      string `json:"confirm_mode"` // "admin_only" | "everyone"
+	PmChatID         string `json:"pm_chat_id"`   // private chat that receives confirmation cards
 }
 
 // handleCreateWorkspace creates (or returns) the workspace bound to a chat.
@@ -199,6 +200,7 @@ func (s *Server) workspaceResp(ctx context.Context, ws domain.Workspace) workspa
 		DigestEnabled:    ws.DigestEnabled,
 		DigestTime:       digestTime,
 		ConfirmMode:      confirmMode(ws.ConfirmMode),
+		PmChatID:         ws.PmChatID,
 	}
 }
 
@@ -232,6 +234,55 @@ func (s *Server) handleSetConfirmMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"confirm_mode": req.Mode})
+}
+
+// handleSetPmChat stores the private-chat id that receives task confirmation cards.
+// Only the workspace host or a registered admin may set this.
+func (s *Server) handleSetPmChat(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	var req struct {
+		PmChatID      string `json:"pm_chat_id"`
+		RequesterTgID string `json:"requester_tg_id"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.PmChatID == "" || req.RequesterTgID == "" {
+		writeError(w, http.StatusBadRequest, "pm_chat_id and requester_tg_id are required")
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), tenant)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace for pm chat", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Allow if requester is the workspace host.
+	if req.RequesterTgID != ws.HostTgID {
+		// Allow if requester has admin role in the workspace.
+		u, err := s.repo.GetUserByTgID(r.Context(), tenant, req.RequesterTgID)
+		if err != nil || u.Role != "admin" {
+			writeError(w, http.StatusForbidden, "only workspace admins may set the PM chat")
+			return
+		}
+	}
+
+	if err := s.repo.SetWorkspacePmChatId(r.Context(), tenant, req.PmChatID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set pm_chat_id", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"pm_chat_id": req.PmChatID})
 }
 
 // deriveTenantID makes a stable tenant id from a chat id (digits only).

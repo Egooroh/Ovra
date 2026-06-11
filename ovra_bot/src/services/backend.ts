@@ -3,7 +3,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8080';
-const TENANT_ID = process.env.TENANT_ID || 'ws-demo';
+const BOT_SECRET  = process.env.BOT_SECRET || '';
+
+// Returns Authorization header if BOT_SECRET is configured.
+function authHeader(): Record<string, string> {
+    return BOT_SECRET ? { 'Authorization': `Bearer ${BOT_SECRET}` } : {};
+}
 
 // Найденный бэкендом похожий дубликат.
 export interface DuplicateTask {
@@ -47,7 +52,8 @@ export async function sendTaskToOvraBackend(
         const response = await fetch(url, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                ...authHeader(),
             },
             body: JSON.stringify(body)
         });
@@ -84,6 +90,7 @@ export interface WorkspaceInfo {
     digest_enabled: boolean;
     digest_time: string;      // "HH:MM"
     confirm_mode: 'admin_only' | 'everyone';
+    pm_chat_id: string;       // private chat that receives confirmation cards
 }
 
 export interface YougileMember {
@@ -110,7 +117,7 @@ export async function getWorkspaceInfo(tenantId: string): Promise<WorkspaceInfo>
 // Создать (идемпотентно) воркспейс для чата.
 export async function createWorkspace(chatId: string | number, name: string, hostTgId: string | number): Promise<WorkspaceInfo> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ chat_id: String(chatId), name, host_tg_id: String(hostTgId) })
     });
     if (!res.ok) throw new Error(`createWorkspace HTTP ${res.status}`);
@@ -132,7 +139,7 @@ export async function registerUser(
     u: { tg_id: string; tg_username?: string; full_name: string; yougile_user_id?: string; role?: string }
 ): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify(u)
     });
     if (!res.ok) throw new Error(`registerUser HTTP ${res.status}`);
@@ -140,8 +147,27 @@ export async function registerUser(
 
 // Мягкое удаление задачи (перемещение в корзину на 24 ч).
 export async function deleteTask(taskId: string): Promise<void> {
-    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`, { method: 'DELETE' });
+    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`, { method: 'DELETE', headers: { ...authHeader() } });
     if (!res.ok) throw new Error(`deleteTask HTTP ${res.status}`);
+}
+
+// Получить задачу по ID.
+export interface TaskRecord {
+    id: string;
+    tenant_id: string;
+    title: string;
+    description: string;
+    status: string;
+    approval_status: string;
+    deadline?: string;
+    assignee_user_id?: string;
+}
+
+export async function getTask(taskId: string): Promise<TaskRecord | null> {
+    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`getTask HTTP ${res.status}`);
+    return res.json() as Promise<TaskRecord>;
 }
 
 // --- Дайджест ---
@@ -200,14 +226,14 @@ export async function listTasks(tenantId: string): Promise<BoardTask[]> {
 }
 
 export async function syncWorkspace(tenantId: string): Promise<SyncResult> {
-    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/sync`, { method: 'POST' });
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/sync`, { method: 'POST', headers: { ...authHeader() } });
     if (!res.ok) throw new Error(`syncWorkspace HTTP ${res.status}`);
     return await res.json() as SyncResult;
 }
 
 // Немедленная очистка корзины воркспейса.
 export async function clearTrash(tenantId: string): Promise<number> {
-    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/trash`, { method: 'DELETE' });
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/trash`, { method: 'DELETE', headers: { ...authHeader() } });
     if (!res.ok) throw new Error(`clearTrash HTTP ${res.status}`);
     const data: any = await res.json();
     return data.deleted ?? 0;
@@ -223,7 +249,7 @@ export async function getTrash(tenantId: string): Promise<any[]> {
 
 export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'everyone'): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/confirm-mode`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ mode }),
     });
     if (!res.ok) throw new Error(`setConfirmMode HTTP ${res.status}`);
@@ -231,7 +257,7 @@ export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'eve
 
 export async function updateDigestSettings(tenantId: string, enabled: boolean, time: string): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/digest`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ enabled, time }),
     });
     if (!res.ok) throw new Error(`updateDigestSettings HTTP ${res.status}`);
@@ -246,7 +272,7 @@ export interface YougileCompany { id: string; name: string; is_admin?: boolean; 
 // Сохранить креды YouGile воркспейса (API-ключ ИЛИ логин/пароль[+компания]).
 export async function saveYougileCreds(tenantId: string, creds: YougileCreds): Promise<void> {
     const c = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/credentials`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify(creds)
     });
     if (!c.ok) throw new Error(`saveYougileCreds HTTP ${c.status}`);
@@ -255,7 +281,7 @@ export async function saveYougileCreds(tenantId: string, creds: YougileCreds): P
 // Список компаний YouGile по логину/паролю (для выбора при онбординге по паролю).
 export async function listYougileCompanies(tenantId: string, login: string, password: string): Promise<YougileCompany[]> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/yougile-companies`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ login, password }),
     });
     if (!res.ok) {
@@ -287,7 +313,7 @@ export async function scheduleCallInOvra(
     if (startsAt) body.starts_at = startsAt;
     const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify(body),
     });
     const data = await response.json().catch(() => ({}));
@@ -322,7 +348,7 @@ export async function addCalendarAccount(
 ): Promise<CalendarAccount> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/calendar/accounts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ provider, credentials, label, calendarIds }),
     });
     if (!res.ok) {
@@ -335,17 +361,60 @@ export async function addCalendarAccount(
 export async function deleteCalendarAccount(tenantId: string, accountId: string): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/calendar/accounts/${accountId}`, {
         method: 'DELETE',
+        headers: { ...authHeader() },
     });
     if (!res.ok) throw new Error(`deleteCalendarAccount HTTP ${res.status}`);
+}
+
+// Установить PM-чат для воркспейса (только для admins/host).
+export async function setPmChatId(tenantId: string, pmChatId: string | number, requesterTgId: string | number): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/pm-chat`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify({ pm_chat_id: String(pmChatId), requester_tg_id: String(requesterTgId) }),
+    });
+    if (!res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        throw new Error(data.error || `setPmChatId HTTP ${res.status}`);
+    }
+}
+
+// Обновить роль пользователя в воркспейсе (admin/member).
+export async function setUserRole(tenantId: string, tgId: string, role: 'admin' | 'member'): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users/${tgId}/role`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify({ role }),
+    });
+    if (!res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        throw new Error(data.error || `setUserRole HTTP ${res.status}`);
+    }
+}
+
+// Получить участника воркспейса по Telegram user id.
+export async function getUserByTgId(tenantId: string, tgId: string | number): Promise<{ id: string; tg_id: string; tg_username: string; full_name: string; role: string } | null> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users/by-tg/${tgId}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`getUserByTgId HTTP ${res.status}`);
+    return await res.json() as { id: string; tg_id: string; tg_username: string; full_name: string; role: string };
+}
+
+// Список участников воркспейса (для поиска по username).
+export async function listWorkspaceUsers(tenantId: string): Promise<Array<{ id: string; tg_id: string; tg_username: string; full_name: string; role: string }>> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/users`);
+    if (!res.ok) throw new Error(`listWorkspaceUsers HTTP ${res.status}`);
+    const data: any = await res.json();
+    return data.users || [];
 }
 
 // Привязать проект к воркспейсу и распознать колонки доски.
 export async function setWorkspaceProject(tenantId: string, projectId: string): Promise<void> {
     const p = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/project`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ project_id: projectId })
     });
     if (!p.ok) throw new Error(`setWorkspaceProject HTTP ${p.status}`);
-    const r = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/board/resolve`, { method: 'POST' });
+    const r = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/board/resolve`, { method: 'POST', headers: { ...authHeader() } });
     if (!r.ok) throw new Error(`board/resolve HTTP ${r.status}`);
 }

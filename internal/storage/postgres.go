@@ -74,11 +74,12 @@ func (p *Postgres) GetWorkspace(ctx context.Context, id string) (domain.Workspac
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id
 		FROM workspaces WHERE id = $1`, id).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
+			&ws.PmChatID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -94,11 +95,12 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id
 		FROM workspaces WHERE chat_id = $1 LIMIT 1`, chatID).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode)
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
+			&ws.PmChatID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -143,7 +145,7 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id
 		FROM workspaces
 		WHERE yougile_api_token_enc IS NOT NULL`)
 	if err != nil {
@@ -155,12 +157,26 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 		var ws domain.Workspace
 		if err := rows.Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
-			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode); err != nil {
+			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
+			&ws.PmChatID); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		out = append(out, ws)
 	}
 	return out, rows.Err()
+}
+
+// SetWorkspacePmChatId stores the private-chat id that receives confirmation cards.
+func (p *Postgres) SetWorkspacePmChatId(ctx context.Context, tenantID, pmChatID string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE workspaces SET pm_chat_id = $2 WHERE id = $1`, tenantID, pmChatID)
+	if err != nil {
+		return fmt.Errorf("set pm_chat_id: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetDigestSettings updates the digest enabled flag and schedule time for a workspace.
@@ -266,8 +282,7 @@ func (p *Postgres) UpsertUser(ctx context.Context, u domain.User) (domain.User, 
 		ON CONFLICT (tenant_id, tg_id) DO UPDATE SET
 			tg_username     = EXCLUDED.tg_username,
 			full_name       = EXCLUDED.full_name,
-			yougile_user_id = EXCLUDED.yougile_user_id,
-			role            = EXCLUDED.role
+			yougile_user_id = EXCLUDED.yougile_user_id
 		RETURNING id`,
 		u.TenantID, u.TgID, u.TgUsername, u.FullName, u.YougileUserID, role).
 		Scan(&u.ID)
@@ -289,6 +304,60 @@ func (p *Postgres) GetUser(ctx context.Context, id string) (domain.User, error) 
 		return domain.User{}, fmt.Errorf("get user: %w", err)
 	}
 	return u, nil
+}
+
+// GetUserByTgID looks up a workspace member by their Telegram user id.
+func (p *Postgres) GetUserByTgID(ctx context.Context, tenantID, tgID string) (domain.User, error) {
+	u, err := scanUser(p.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, tg_id, tg_username, full_name, yougile_user_id, role
+		FROM users WHERE tenant_id = $1 AND tg_id = $2`, tenantID, tgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.User{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.User{}, fmt.Errorf("get user by tg_id: %w", err)
+	}
+	return u, nil
+}
+
+// SetUserRole updates the role of a workspace member identified by Telegram id.
+func (p *Postgres) SetUserRole(ctx context.Context, tenantID, tgID, role string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE users SET role = $3 WHERE tenant_id = $1 AND tg_id = $2`,
+		tenantID, tgID, role)
+	if err != nil {
+		return fmt.Errorf("set user role: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetUserYougileBinding updates (or clears) the yougile_user_id for a workspace member.
+func (p *Postgres) SetUserYougileBinding(ctx context.Context, tenantID, tgID, yougileUserID string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE users SET yougile_user_id = $3 WHERE tenant_id = $1 AND tg_id = $2`,
+		tenantID, tgID, yougileUserID)
+	if err != nil {
+		return fmt.Errorf("set user yougile binding: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeletePhantomUser removes placeholder records (tg_id LIKE 'yg:%') whose
+// yougile_user_id matches — called after a real Telegram user registers.
+func (p *Postgres) DeletePhantomUser(ctx context.Context, tenantID, yougileUserID string) error {
+	_, err := p.pool.Exec(ctx,
+		`DELETE FROM users WHERE tenant_id = $1 AND yougile_user_id = $2 AND tg_id LIKE 'yg:%'`,
+		tenantID, yougileUserID)
+	if err != nil {
+		return fmt.Errorf("delete phantom user: %w", err)
+	}
+	return nil
 }
 
 func (p *Postgres) ListUsersByTenant(ctx context.Context, tenantID string) ([]domain.User, error) {

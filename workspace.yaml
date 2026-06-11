@@ -2,7 +2,7 @@
 # Replace the placeholder IDs with real values from YouGile before Phase 2.
 workspaces:
   - id: "ws-demo"
-    chat_id: "-1003918185192"
+    chat_id: "0"
     name: "Demo Team"
     yougile_project_id: "f0f74e85-cc80-4f03-a7bf-f7bf0c4d1b46"
     columns:

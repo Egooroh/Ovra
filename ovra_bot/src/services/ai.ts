@@ -53,6 +53,43 @@ function buildSystemPrompt(): string {
 `;
 }
 
+// Partial update returned by parseTaskEdit — only changed fields.
+export type TaskPatch = Partial<Pick<ParsedTask, 'title' | 'assignee' | 'deadline' | 'description'>>;
+
+export async function parseTaskEdit(current: ParsedTask, editText: string): Promise<TaskPatch> {
+    const today = new Date().toISOString().slice(0, 10);
+    const systemPrompt = `Сегодня ${today}. Пользователь хочет отредактировать задачу.
+Верни ТОЛЬКО JSON с полями, которые нужно изменить (не включай поля, которые остаются прежними).
+Формат дедлайна: YYYY-MM-DD или YYYY-MM-DDTHH:mm. Пустая строка означает "убрать дедлайн".
+Если ничего не изменилось — верни {}.
+Пример ответа: {"title": "Новое название", "assignee": "Иван"}`;
+
+    const userPrompt = `Текущая задача:
+- Название: ${current.title || '—'}
+- Исполнитель: ${current.assignee || '—'}
+- Дедлайн: ${current.deadline || '—'}
+- Описание: ${current.description || '—'}
+
+Правка пользователя: "${editText}"`;
+
+    try {
+        const completion = await openai.chat.completions.create({
+            model: process.env.AI_MODEL || "mistralai/mistral-7b-instruct:free",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+            ],
+        });
+        let raw = completion.choices[0]?.message?.content?.trim() ?? '{}';
+        raw = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const patch = JSON.parse(raw);
+        return typeof patch === 'object' && patch !== null ? patch as TaskPatch : {};
+    } catch (e) {
+        console.error('parseTaskEdit error:', e);
+        return {};
+    }
+}
+
 export async function parseMessageWithAI(message: string): Promise<ParsedTask[]> {
     try {
         console.log("⏳ Отправляю запрос в OpenRouter...");

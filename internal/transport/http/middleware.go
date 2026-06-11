@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,29 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 		r.wrote = true
 	}
 	return r.ResponseWriter.Write(b)
+}
+
+// requireBotSecret is middleware that enforces the BOT_SECRET token on all
+// mutating /v1/* requests (POST/PATCH/DELETE). GET and /miniapp/* are exempt.
+// When BOT_SECRET is empty the check is skipped (dev mode).
+func (s *Server) requireBotSecret(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secret := s.cfg.BotSecret
+		if secret == "" || !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if auth != secret {
+			writeError(w, http.StatusUnauthorized, "invalid or missing bot secret")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // recoverPanic turns a handler panic into a 500 instead of crashing the server.

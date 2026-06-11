@@ -1,13 +1,14 @@
 // src/bot.ts
 import { Telegraf, Markup, Context } from "telegraf";
 import { isPotentialTask } from "./utils/heuristics.js";
-import { parseMessageWithAI, type ParsedTask } from "./services/ai.js";
+import { parseMessageWithAI, parseTaskEdit, type ParsedTask } from "./services/ai.js";
 import {
     sendTaskToOvraBackend, resolveTenant, createWorkspace, getWorkspaceInfo,
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject, listYougileCompanies,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
-    deleteTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    deleteTask, getTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    setPmChatId, setUserRole, listWorkspaceUsers, getUserByTgId,
     setConfirmMode,
     type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany
 } from "./services/backend.js";
@@ -84,6 +85,40 @@ bot.use((ctx, next) => {
 interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: number; }
 const pendingTasks = new Map<string, PendingTask>();
 
+// Карта "${chatId}:${messageId}" → taskId для перехвата ответов-правок на карточки.
+const cardMessages = new Map<string, string>();
+
+function clearCardEntry(taskId: string) {
+    for (const [key, tid] of cardMessages) {
+        if (tid === taskId) cardMessages.delete(key);
+    }
+}
+
+// Восстанавливает PendingTask из БД, если он был потерян при рестарте бота.
+// Возвращает null, если задача не найдена или уже не в статусе pending.
+async function recoverPendingTask(taskId: string): Promise<PendingTask | null> {
+    try {
+        const dbTask = await getTask(taskId);
+        if (!dbTask || dbTask.approval_status !== 'pending') return null;
+        const ws = await getWorkspaceInfo(dbTask.tenant_id);
+        if (!ws) return null;
+        const recovered: PendingTask = {
+            task: {
+                title: dbTask.title,
+                description: dbTask.description || undefined,
+                assignee: undefined,
+                deadline: dbTask.deadline ? dbTask.deadline.substring(0, 10) : undefined,
+            },
+            tenantId: dbTask.tenant_id,
+            originChatId: ws.chat_id ? Number(ws.chat_id) : undefined,
+        };
+        pendingTasks.set(taskId, recovered);
+        return recovered;
+    } catch {
+        return null;
+    }
+}
+
 // Куда слать подтверждения задач: 'pm' (личка ПМа) или 'group' (группа-источник).
 const confirmDefault: 'pm' | 'group' =
     (process.env.CONFIRM_TARGET === 'pm' ? 'pm' : 'group');
@@ -120,20 +155,53 @@ const pendingMeetingTasks = new Map<string, PendingMeetingTask>();
 // Проверка, является ли пользователь администратором (или создателем) группы.
 // Используется для гейтинга подтверждения задач из созвона: только админ,
 // которому в Telegram-группе выданы права, может одобрять/отклонять задачи.
-// Возвращает true, если пользователь может подтверждать задачи.
-// mode='everyone' — разрешено всем; mode='admin_only' — только администраторам группы.
-async function canConfirmTasks(chatId: number | string, userId: number, mode: string): Promise<boolean> {
-    if (mode === 'everyone') return true;
+// Проверить, является ли пользователь TG-администратором чата.
+async function isTgAdmin(chatId: number | string, userId: number): Promise<boolean> {
     try {
-        const member = await bot.telegram.getChatMember(chatId, userId);
-        const ok = member.status === 'creator' || member.status === 'administrator';
-        console.log(`[canConfirm] chat=${chatId} user=${userId} status=${member.status} mode=${mode} → ${ok}`);
-        return ok;
-    } catch (e) {
-        console.error(`[canConfirm] chat=${chatId} user=${userId} error:`, e);
+        const m = await bot.telegram.getChatMember(chatId, userId);
+        return m.status === 'creator' || m.status === 'administrator';
+    } catch {
         return false;
     }
 }
+
+// canManageTasks — управление задачами (одобрить/отклонить/редактировать).
+// Разрешено: TG-admin, workspace admin, workspace moderator.
+// При mode='everyone' разрешено всем участникам группы.
+async function canManageTasks(
+    chatId: number | string,
+    userId: number,
+    tenantId: string,
+    mode: string,
+): Promise<boolean> {
+    if (mode === 'everyone') return true;
+    if (await isTgAdmin(chatId, userId)) return true;
+    try {
+        const u = await getUserByTgId(tenantId, userId);
+        return u?.role === 'admin' || u?.role === 'moderator';
+    } catch {
+        return false;
+    }
+}
+
+// canManageSettings — изменение настроек воркспейса (дайджест, confirm_mode и т.д.).
+// Разрешено только TG-admin и workspace admin.
+async function canManageSettings(
+    chatId: number | string,
+    userId: number,
+    tenantId: string,
+): Promise<boolean> {
+    if (await isTgAdmin(chatId, userId)) return true;
+    try {
+        const u = await getUserByTgId(tenantId, userId);
+        return u?.role === 'admin';
+    } catch {
+        return false;
+    }
+}
+
+// Оставляем алиас для обратной совместимости внутри файла.
+const canConfirmTasks = canManageTasks;
 
 // Payload, который бэкенд шлёт боту после завершения созвона.
 export interface MeetingDonePayload {
@@ -154,7 +222,7 @@ interface CalendarSession {
 const calendarSessions = new Map<number, CalendarSession>();
 
 // --- СИСТЕМА ПРИВЯЗКИ ПОЛЬЗОВАТЕЛЕЙ (Маппинг) ---
-const MAPPING_FILE = path.resolve(process.cwd(), 'users.json');
+const MAPPING_FILE = path.resolve(process.cwd(), 'data', 'users.json');
 let userMapping: Record<string, string> = {};
 
 // Загружаем сохраненные теги при запуске
@@ -211,7 +279,6 @@ bot.command('start', async (ctx) => {
         return ctx.reply('Напишите мне в личные сообщения 🙏');
     }
     const userId = ctx.from.id;
-    activePmChatId = ctx.chat.id; // эта личка получает карточки на одобрение
 
     // Deep-link payload = tenant_id воркспейса (из кнопки «Открыть бота»).
     const payload = (ctx.message.text.split(' ').slice(1).join(' ') || '').trim();
@@ -227,6 +294,18 @@ bot.command('start', async (ctx) => {
     const tenant = payload;
     try {
         const ws = await getWorkspaceInfo(tenant);
+
+        // If this user is the group host or a Telegram admin in the group, persist
+        // this private chat as the PM destination for task confirmation cards.
+        const isHost = String(userId) === ws.host_tg_id;
+        let isTgAdmin = false;
+        try {
+            const member = await ctx.telegram.getChatMember(parseInt(ws.chat_id), userId);
+            isTgAdmin = member.status === 'administrator' || member.status === 'creator';
+        } catch {}
+        if (isHost || isTgAdmin) {
+            await setPmChatId(tenant, ctx.chat.id, userId).catch(() => {});
+        }
 
         // 1) Не подключён → онбординг админа: выбор способа подключения.
         if (!ws.connected) {
@@ -400,6 +479,27 @@ bot.command('setup', async (ctx) => {
     }
 });
 
+// --- Карточки задач ---
+
+function buildCardText(task: ParsedTask): string {
+    return `🆕 *Новая задача на подтверждение*\n` +
+           `━━━━━━━━━━━━━━━━━━\n` +
+           `📌 *${task.title || 'Без названия'}*\n\n` +
+           `👤 Исполнитель: ${task.assignee || '—'}\n` +
+           `⏳ Дедлайн: ${task.deadline || '—'}\n` +
+           `📝 ${task.description || 'без описания'}\n` +
+           `━━━━━━━━━━━━━━━━━━\n` +
+           `_Создать карточку в YouGile? Ответьте на сообщение, чтобы отредактировать._`;
+}
+
+function buildCardKeyboard(taskId: string) {
+    return Markup.inlineKeyboard([
+        Markup.button.callback('✅ Одобрить', `approve_${taskId}`),
+        Markup.button.callback('✏️ Редактировать', `edit_hint_${taskId}`),
+        Markup.button.callback('❌ Отклонить', `reject_${taskId}`),
+    ]);
+}
+
 // Резолвит «я» в имя отправителя: сначала ищет /bind-привязку, потом берёт имя из Telegram.
 function resolveSelfAssignee(sender: { first_name: string; last_name?: string; username?: string }): string {
     const tag = sender.username ? `@${sender.username.toLowerCase()}` : null;
@@ -438,12 +538,14 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
     if (tasks.length === 0) return;
 
     const target = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
-    const targetChatId = target === 'group' ? chatId : activePmChatId;
+    // Per-workspace pm_chat_id takes priority; fall back to env-configured default.
+    const pmChatId = ws.pm_chat_id || activePmChatId;
+    const targetChatId = target === 'group' ? chatId : pmChatId;
 
     if (!targetChatId) {
-        console.error("❌ ID ПМа не установлен! Некуда отправлять задачу.");
+        console.error("❌ PM-чат не установлен для воркспейса", ws.tenant_id);
         if (ctx.chat && ctx.chat.type !== 'private') {
-            await ctx.reply("❌ Задача найдена, но я не знаю, кому её отправить на подтверждение. Кто-нибудь, напишите мне /start в личные сообщения, или используйте /confirm group.");
+            await ctx.reply("❌ Задача найдена, но PM-чат не настроен. Администратор: откройте бота в личке (/start) чтобы стать получателем задач.");
         }
         return;
     }
@@ -458,23 +560,14 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
         const taskId = crypto.randomBytes(8).toString('hex');
         pendingTasks.set(taskId, { task, tenantId: ws.tenant_id, originChatId: chatId });
 
-        const messageText = `🆕 *Новая задача на подтверждение*\n` +
-                            `━━━━━━━━━━━━━━━━━━\n` +
-                            `📌 *${task.title || 'Без названия'}*\n\n` +
-                            `👤 Исполнитель: ${task.assignee || '—'}\n` +
-                            `⏳ Дедлайн: ${task.deadline || '—'}\n` +
-                            `📝 ${task.description || 'без описания'}\n` +
-                            `━━━━━━━━━━━━━━━━━━\n` +
-                            `_Создать карточку в YouGile?_`;
+        const messageText = buildCardText(task);
 
         try {
-            await ctx.telegram.sendMessage(targetChatId, messageText, {
+            const sent = await ctx.telegram.sendMessage(targetChatId, messageText, {
                 parse_mode: 'Markdown',
-                ...Markup.inlineKeyboard([
-                    Markup.button.callback('✅ Одобрить', `approve_${taskId}`),
-                    Markup.button.callback('❌ Отклонить', `reject_${taskId}`)
-                ])
+                ...buildCardKeyboard(taskId),
             });
+            cardMessages.set(`${targetChatId}:${sent.message_id}`, taskId);
         } catch (error) {
             console.error("❌ Ошибка отправки подтверждения.", error);
         }
@@ -713,7 +806,7 @@ async function sendStats(ctx: Context) {
 
     const proxyStatus = process.env.PROXY_URL ? `✅ Включен (${process.env.PROXY_URL})` : `❌ Выключен`;
     const aiStatus = process.env.OPENROUTER_API_KEY ? `✅ Подключен (${process.env.AI_MODEL || 'по умолчанию'})` : `❌ Нет ключа`;
-    const pmStatus = activePmChatId ? `✅ Установлен (${activePmChatId})` : `❌ Не установлен (напиши /start в личку)`;
+    const pmStatus = activePmChatId ? `✅ Fallback (${activePmChatId})` : `➖ Используется pm_chat_id из БД`;
 
     let backendStatus = '❌ Недоступен / Выключен';
     try {
@@ -758,6 +851,91 @@ bot.command('stats', sendStats);
 // swallowed by the generic text handler.
 bot.hears(BTN_STATUS, sendStats);
 bot.hears(BTN_HELP,   sendHelp);
+
+// Кнопка «Редактировать» на карточке — показываем подсказку как редактировать.
+bot.action(/^edit_hint_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery(
+        'Ответьте на это сообщение (кнопка «Ответить»), написав что изменить.\n' +
+        'Например: «исполнитель Иван», «дедлайн 20 июня», «переименуй в "Отчёт Q2"»',
+        { show_alert: true }
+    );
+});
+
+// Reply-перехват: если пользователь ответил на карточку задачи — редактируем её.
+bot.use(async (ctx, next) => {
+    const msg = ctx.message as any;
+    if (!msg?.text || !msg.reply_to_message) return next();
+
+    const chatId = msg.chat.id;
+    const replyMsgId: number = msg.reply_to_message.message_id;
+    const cardKey = `${chatId}:${replyMsgId}`;
+    const taskId = cardMessages.get(cardKey);
+    if (!taskId) return next();
+
+    const pending = pendingTasks.get(taskId);
+    if (!pending) {
+        await ctx.telegram.sendMessage(chatId, '⚠️ Задача уже обработана или устарела.', {
+            reply_parameters: { message_id: msg.message_id },
+        });
+        return;
+    }
+
+    // Проверяем права: редактировать может только admin / moderator / TG-admin.
+    const userId: number = msg.from?.id;
+    if (userId) {
+        const ws = await resolveTenant(pending.originChatId ?? chatId).catch(() => null);
+        const mode = ws?.confirm_mode ?? 'admin_only';
+        const allowed = await canManageTasks(pending.originChatId ?? chatId, userId, pending.tenantId, mode);
+        if (!allowed) {
+            await ctx.telegram.sendMessage(chatId, '⛔ Редактировать задачи могут только администраторы и модераторы.', {
+                reply_parameters: { message_id: msg.message_id },
+            });
+            return;
+        }
+    }
+
+    // Парсим правку через AI.
+    let patch: Awaited<ReturnType<typeof parseTaskEdit>>;
+    try {
+        patch = await parseTaskEdit(pending.task, msg.text);
+    } catch {
+        await ctx.telegram.sendMessage(chatId, '❌ Не удалось распознать правку. Попробуйте ещё раз.', {
+            reply_parameters: { message_id: msg.message_id },
+        });
+        return;
+    }
+
+    if (Object.keys(patch).length === 0) {
+        await ctx.telegram.sendMessage(chatId, '🤔 Не понял, что именно изменить. Попробуйте описать точнее.', {
+            reply_parameters: { message_id: msg.message_id },
+        });
+        return;
+    }
+
+    // Применяем патч к задаче.
+    Object.assign(pending.task, patch);
+
+    // Редактируем карточку на месте.
+    try {
+        await ctx.telegram.editMessageText(
+            chatId,
+            replyMsgId,
+            undefined,
+            buildCardText(pending.task),
+            { parse_mode: 'Markdown', ...buildCardKeyboard(taskId) }
+        );
+    } catch (e) {
+        console.error('edit card message:', e);
+    }
+
+    // Подтверждаем правку коротким сообщением.
+    const changed = Object.keys(patch).map(k => ({
+        title: 'название', assignee: 'исполнитель', deadline: 'дедлайн', description: 'описание'
+    } as Record<string, string>)[k]).filter(Boolean).join(', ');
+    await ctx.telegram.sendMessage(chatId, `✏️ Обновлено: ${changed}.`, {
+        reply_parameters: { message_id: replyMsgId },
+    });
+});
 
 bot.on("text", async (ctx, next) => {
     const message = ctx.message;
@@ -838,6 +1016,8 @@ bot.on("text", async (ctx, next) => {
             return;
         }
 
+        // Команды (/help, /stats и т.д.) пробрасываем дальше по цепочке.
+        if (message.text?.startsWith('/')) return next();
         return; // прочие личные сообщения не разбираем как задачи
     }
 
@@ -1016,6 +1196,7 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
     }
 
     pendingTasks.delete(taskId);
+    clearCardEntry(taskId);
 }
 
 // guardedSubmit запускает submitTask с защитой от двойного клика и уносит
@@ -1039,13 +1220,13 @@ function guardedSubmit(ctx: Context, taskId: string, pending: PendingTask, force
 
 bot.action(/^approve_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
-    const pending = pendingTasks.get(taskId);
+    const pending = pendingTasks.get(taskId) ?? await recoverPendingTask(taskId);
     if (!pending) return ack(ctx, 'Задача устарела или не найдена.');
     if (pending.originChatId) {
         const ws = await resolveTenant(pending.originChatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
-        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
-            return ack(ctx, 'Только администратор может подтверждать задачи.', true);
+        if (!(await canManageTasks(pending.originChatId, ctx.from!.id, pending.tenantId, mode))) {
+            return ack(ctx, 'Только администратор или модератор может подтверждать задачи.', true);
         }
     }
     await ack(ctx, 'Проверяю…');
@@ -1057,13 +1238,13 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
 // «Да, добавить» — создать несмотря на найденные дубли.
 bot.action(/^force_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
-    const pending = pendingTasks.get(taskId);
+    const pending = pendingTasks.get(taskId) ?? await recoverPendingTask(taskId);
     if (!pending) return ack(ctx, 'Задача устарела или не найдена.');
     if (pending.originChatId) {
         const ws = await resolveTenant(pending.originChatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
-        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
-            return ack(ctx, 'Только администратор может подтверждать задачи.', true);
+        if (!(await canManageTasks(pending.originChatId, ctx.from!.id, pending.tenantId, mode))) {
+            return ack(ctx, 'Только администратор или модератор может подтверждать задачи.', true);
         }
     }
     await ack(ctx, 'Добавляю…');
@@ -1072,16 +1253,17 @@ bot.action(/^force_(.+)$/, async (ctx) => {
 
 bot.action(/^reject_(.+)$/, async (ctx) => {
     const taskId = ctx.match[1]!;
-    const pending = pendingTasks.get(taskId);
+    const pending = pendingTasks.get(taskId) ?? await recoverPendingTask(taskId);
     if (!pending) return ctx.answerCbQuery('Задача устарела или не найдена.');
     if (pending.originChatId) {
         const ws = await resolveTenant(pending.originChatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
-        if (!(await canConfirmTasks(pending.originChatId, ctx.from!.id, mode))) {
-            return ctx.answerCbQuery('Только администратор может отклонять задачи.', { show_alert: true });
+        if (!(await canManageTasks(pending.originChatId, ctx.from!.id, pending.tenantId, mode))) {
+            return ctx.answerCbQuery('Только администратор или модератор может отклонять задачи.', { show_alert: true });
         }
     }
     pendingTasks.delete(taskId);
+    clearCardEntry(taskId);
     await ctx.editMessageText('🗑️ Задача отклонена.');
 });
 
@@ -1121,7 +1303,7 @@ bot.command('confirm_mode', async (ctx) => {
     const ws = await resolveTenant(ctx.chat.id).catch(() => null);
     if (!ws) return ctx.reply('❌ Чат не привязан к доске.');
 
-    const isAdmin = await canConfirmTasks(ctx.chat.id, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(ctx.chat.id, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) {
         return ctx.reply('⛔ Изменять режим может только администратор группы.');
     }
@@ -1151,7 +1333,7 @@ bot.action('cm_admin_only', async (ctx) => {
     if (!chatId) return ctx.answerCbQuery();
     const ws = await resolveTenant(chatId).catch(() => null);
     if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
-    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
 
     await setConfirmMode(ws.tenant_id, 'admin_only');
@@ -1173,7 +1355,7 @@ bot.action('cm_everyone', async (ctx) => {
     if (!chatId) return ctx.answerCbQuery();
     const ws = await resolveTenant(chatId).catch(() => null);
     if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
-    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
 
     await setConfirmMode(ws.tenant_id, 'everyone');
@@ -1222,6 +1404,90 @@ async function sendHelp(ctx: Context) {
     );
 }
 bot.command('help', sendHelp);
+
+// /makeadmin @username — назначить пользователя администратором Ovra в группе.
+bot.command('makeadmin', async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply('Команда работает только в группах.');
+    const callerId = ctx.from.id;
+    const callerMember = await ctx.telegram.getChatMember(ctx.chat.id, callerId);
+    if (callerMember.status !== 'administrator' && callerMember.status !== 'creator') {
+        return ctx.reply('❌ Только администраторы Telegram могут назначать роли Ovra.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('❌ Этот чат не привязан к доске.');
+
+    const args = ctx.message.text.split(' ').slice(1).join(' ').trim().replace(/^@/, '').toLowerCase();
+    if (!args) return ctx.reply('Использование: /makeadmin @username');
+
+    const users = await listWorkspaceUsers(ws.tenant_id).catch(() => []);
+    const user = users.find(u => u.tg_username?.replace(/^@/, '').toLowerCase() === args);
+    if (!user) return ctx.reply(`❌ @${args} не найден в пространстве. Пользователь должен сначала привязаться через /start.`);
+
+    await setUserRole(ws.tenant_id, user.tg_id, 'admin');
+    await ctx.reply(`✅ @${args} теперь администратор Ovra — может подтверждать задачи и управлять доской.`);
+});
+
+// /removeadmin @username — снять роль администратора Ovra.
+bot.command('removeadmin', async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply('Команда работает только в группах.');
+    const callerId = ctx.from.id;
+    const callerMember = await ctx.telegram.getChatMember(ctx.chat.id, callerId);
+    if (callerMember.status !== 'administrator' && callerMember.status !== 'creator') {
+        return ctx.reply('❌ Только администраторы Telegram могут изменять роли Ovra.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('❌ Этот чат не привязан к доске.');
+
+    const args = ctx.message.text.split(' ').slice(1).join(' ').trim().replace(/^@/, '').toLowerCase();
+    if (!args) return ctx.reply('Использование: /removeadmin @username');
+
+    const users = await listWorkspaceUsers(ws.tenant_id).catch(() => []);
+    const user = users.find(u => u.tg_username?.replace(/^@/, '').toLowerCase() === args);
+    if (!user) return ctx.reply(`❌ @${args} не найден в пространстве.`);
+
+    await setUserRole(ws.tenant_id, user.tg_id, 'member');
+    await ctx.reply(`✅ @${args} больше не администратор Ovra.`);
+});
+
+// /makemod @username — назначить пользователя модератором Ovra (управление задачами).
+bot.command('makemod', async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply('Команда работает только в группах.');
+    if (!(await isTgAdmin(ctx.chat.id, ctx.from.id))) {
+        return ctx.reply('❌ Только администраторы Telegram могут назначать роли Ovra.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('❌ Этот чат не привязан к доске.');
+
+    const args = ctx.message.text.split(' ').slice(1).join(' ').trim().replace(/^@/, '').toLowerCase();
+    if (!args) return ctx.reply('Использование: /makemod @username');
+
+    const users = await listWorkspaceUsers(ws.tenant_id).catch(() => []);
+    const user = users.find(u => u.tg_username?.replace(/^@/, '').toLowerCase() === args);
+    if (!user) return ctx.reply(`❌ @${args} не найден в пространстве. Пользователь должен сначала привязаться через /start.`);
+
+    await setUserRole(ws.tenant_id, user.tg_id, 'moderator');
+    await ctx.reply(`✅ @${args} теперь модератор Ovra — может подтверждать и редактировать задачи.`);
+});
+
+// /removemod @username — снять роль модератора Ovra.
+bot.command('removemod', async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply('Команда работает только в группах.');
+    if (!(await isTgAdmin(ctx.chat.id, ctx.from.id))) {
+        return ctx.reply('❌ Только администраторы Telegram могут изменять роли Ovra.');
+    }
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    if (!ws) return ctx.reply('❌ Этот чат не привязан к доске.');
+
+    const args = ctx.message.text.split(' ').slice(1).join(' ').trim().replace(/^@/, '').toLowerCase();
+    if (!args) return ctx.reply('Использование: /removemod @username');
+
+    const users = await listWorkspaceUsers(ws.tenant_id).catch(() => []);
+    const user = users.find(u => u.tg_username?.replace(/^@/, '').toLowerCase() === args);
+    if (!user) return ctx.reply(`❌ @${args} не найден в пространстве.`);
+
+    await setUserRole(ws.tenant_id, user.tg_id, 'member');
+    await ctx.reply(`✅ @${args} больше не модератор Ovra.`);
+});
 
 // Бота добавили в группу / сделали админом → создаём воркспейс и зовём настраивать доску.
 bot.on('my_chat_member', async (ctx) => {
@@ -1465,8 +1731,8 @@ bot.action(/^mtask_ok_(.+)$/, async (ctx) => {
 
     const ws = await resolveTenant(pending.groupChatId).catch(() => null);
     const mode = ws?.confirm_mode ?? 'admin_only';
-    if (!(await canConfirmTasks(pending.groupChatId, ctx.from!.id, mode))) {
-        return ack(ctx, 'Только администратор может подтверждать задачи.', true);
+    if (!(await canManageTasks(pending.groupChatId, ctx.from!.id, pending.tenantId, mode))) {
+        return ack(ctx, 'Только администратор или модератор может подтверждать задачи.', true);
     }
 
     try {
@@ -1503,8 +1769,8 @@ bot.action(/^mtask_no_(.+)$/, async (ctx) => {
 
     const ws2 = await resolveTenant(pending.groupChatId).catch(() => null);
     const mode2 = ws2?.confirm_mode ?? 'admin_only';
-    if (!(await canConfirmTasks(pending.groupChatId, ctx.from!.id, mode2))) {
-        return ctx.answerCbQuery('Только администратор может отклонять задачи.', { show_alert: true });
+    if (!(await canManageTasks(pending.groupChatId, ctx.from!.id, pending.tenantId, mode2))) {
+        return ctx.answerCbQuery('Только администратор или модератор может отклонять задачи.', { show_alert: true });
     }
 
     pendingMeetingTasks.delete(taskId);
@@ -1718,7 +1984,7 @@ bot.command('digest_time', async (ctx) => {
     const ws = await resolveTenant(ctx.chat.id).catch(() => null);
     if (!ws) return ctx.reply('⚠️ Этот чат не привязан к доске.');
 
-    const isAdmin = await canConfirmTasks(ctx.chat.id, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(ctx.chat.id, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) return ctx.reply('⛔ Менять расписание дайджеста может только администратор группы.');
 
     const arg = ctx.message.text.split(' ').slice(1).join(' ').trim().toLowerCase();
@@ -1749,7 +2015,7 @@ bot.action(/^dt_set_(\d{2}:\d{2})$/, async (ctx) => {
     if (!chatId) return ctx.answerCbQuery();
     const ws = await resolveTenant(chatId).catch(() => null);
     if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
-    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
 
     await updateDigestSettings(ws.tenant_id, true, time);
@@ -1765,7 +2031,7 @@ bot.action('dt_off', async (ctx) => {
     if (!chatId) return ctx.answerCbQuery();
     const ws = await resolveTenant(chatId).catch(() => null);
     if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
-    const isAdmin = await canConfirmTasks(chatId, ctx.from!.id, 'admin_only');
+    const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
     if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
 
     const time = ws.digest_time || '09:00';

@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
+	"ovra/internal/domain"
 	"ovra/internal/integrations/yougile"
 	"ovra/internal/storage"
 )
@@ -65,6 +67,21 @@ func parseTelegramInitData(initData, botToken string) (url.Values, error) {
 	if !hmac.Equal([]byte(expected), []byte(received)) {
 		return nil, errors.New("init_data: signature mismatch")
 	}
+
+	// Reject stale initData (replay protection). Telegram sets auth_date to
+	// the Unix timestamp when the data was signed — discard anything older than 48h.
+	authDateStr := vals.Get("auth_date")
+	if authDateStr == "" {
+		return nil, errors.New("init_data: missing auth_date")
+	}
+	var authDateUnix int64
+	if _, err := fmt.Sscanf(authDateStr, "%d", &authDateUnix); err != nil {
+		return nil, errors.New("init_data: invalid auth_date")
+	}
+	if time.Since(time.Unix(authDateUnix, 0)) > 48*time.Hour {
+		return nil, errors.New("init_data: expired (older than 48h)")
+	}
+
 	return vals, nil
 }
 
@@ -120,6 +137,7 @@ type miniappVerifyResponse struct {
 	} `json:"user"`
 	Workspace workspaceResponse `json:"workspace"`
 	IsAdmin   bool              `json:"is_admin"`
+	Role      string            `json:"role"` // "admin" | "moderator" | "member"
 }
 
 // handleMiniAppVerify verifies Telegram initData and returns the workspace
@@ -162,6 +180,20 @@ func (s *Server) handleMiniAppVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tgIDStr := fmt.Sprintf("%d", user.ID)
+	isAdmin := ws.HostTgID == tgIDStr
+	role := domain.RoleMember
+	if isAdmin {
+		role = domain.RoleAdmin
+	} else {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, tgIDStr); err == nil {
+			role = u.Role
+			if u.Role == domain.RoleAdmin {
+				isAdmin = true
+			}
+		}
+	}
+
 	var resp miniappVerifyResponse
 	resp.User.ID = user.ID
 	resp.User.FirstName = user.FirstName
@@ -169,7 +201,8 @@ func (s *Server) handleMiniAppVerify(w http.ResponseWriter, r *http.Request) {
 	resp.User.Username = user.Username
 	resp.User.PhotoURL = user.PhotoURL
 	resp.Workspace = s.workspaceResp(r.Context(), ws)
-	resp.IsAdmin = ws.HostTgID == fmt.Sprintf("%d", user.ID)
+	resp.IsAdmin = isAdmin
+	resp.Role = role
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -447,4 +480,283 @@ func (s *Server) handleMiniAppCompanies(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"companies": companiesView(companies)})
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/set-role
+// ---------------------------------------------------------------------------
+
+type miniappSetRoleRequest struct {
+	InitData string `json:"init_data"`
+	TenantID string `json:"tenant_id"`
+	TgID     string `json:"tg_id"`
+	Role     string `json:"role"`
+}
+
+// handleMiniAppSetRole verifies the caller is a workspace admin, then updates
+// the Ovra role of the target user. Used by the mini-app role management UI.
+func (s *Server) handleMiniAppSetRole(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappSetRoleRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" || req.TgID == "" || req.Role == "" {
+		writeError(w, http.StatusBadRequest, "init_data, tenant_id, tg_id and role are required")
+		return
+	}
+	if req.Role != domain.RoleAdmin && req.Role != domain.RoleModerator && req.Role != domain.RoleMember {
+		writeError(w, http.StatusBadRequest, `role must be "admin", "moderator" or "member"`)
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp set-role)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only workspace admins can change roles")
+		return
+	}
+
+	if err := s.repo.SetUserRole(r.Context(), req.TenantID, req.TgID, req.Role); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found in workspace")
+			return
+		}
+		s.log.Error("set user role (miniapp)", "tenant", req.TenantID, "tg_id", req.TgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": req.TgID, "role": req.Role})
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/bind-user
+// ---------------------------------------------------------------------------
+
+type miniappBindUserRequest struct {
+	InitData      string `json:"init_data"`
+	TenantID      string `json:"tenant_id"`
+	TgID          string `json:"tg_id"`
+	YougileUserID string `json:"yougile_user_id"` // empty = remove binding
+}
+
+// handleMiniAppBindUser lets a workspace admin link (or unlink) a TG user to
+// a YouGile account directly from the mini-app, without requiring the user to
+// go through /start themselves.
+func (s *Server) handleMiniAppBindUser(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappBindUserRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" || req.TgID == "" {
+		writeError(w, http.StatusBadRequest, "init_data, tenant_id and tg_id are required")
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp bind-user)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only workspace admins can change user bindings")
+		return
+	}
+
+	if err := s.repo.SetUserYougileBinding(r.Context(), req.TenantID, req.TgID, req.YougileUserID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found in workspace")
+			return
+		}
+		s.log.Error("set user yougile binding (miniapp)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// If a new binding was set, clean up any phantom placeholder for that YouGile user.
+	if req.YougileUserID != "" {
+		_ = s.repo.DeletePhantomUser(r.Context(), req.TenantID, req.YougileUserID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": req.TgID, "yougile_user_id": req.YougileUserID})
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/update-task
+// ---------------------------------------------------------------------------
+
+type miniappUpdateTaskRequest struct {
+	InitData    string  `json:"init_data"`
+	TenantID    string  `json:"tenant_id"`
+	TaskID      string  `json:"task_id"`
+	Title       *string `json:"title,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Status      *string `json:"status,omitempty"`
+	AssigneeID  *string `json:"assignee_user_id,omitempty"`
+	Deadline    *string `json:"deadline,omitempty"`
+}
+
+// handleMiniAppUpdateTask verifies Telegram identity + admin/moderator role,
+// then proxies a task patch to the internal update handler.
+func (s *Server) handleMiniAppUpdateTask(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappUpdateTaskRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" || req.TaskID == "" {
+		writeError(w, http.StatusBadRequest, "init_data, tenant_id and task_id are required")
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp update-task)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	allowed := ws.HostTgID == callerTgID
+	if !allowed {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil {
+			allowed = u.Role == domain.RoleAdmin || u.Role == domain.RoleModerator
+		}
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "only admins and moderators can edit tasks")
+		return
+	}
+
+	task, err := s.repo.GetTask(r.Context(), req.TaskID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.log.Error("get task (miniapp update-task)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if task.TenantID != req.TenantID {
+		writeError(w, http.StatusForbidden, "task does not belong to this workspace")
+		return
+	}
+
+	if req.Title != nil {
+		task.Title = *req.Title
+	}
+	if req.Description != nil {
+		task.Description = *req.Description
+	}
+	if req.Status != nil {
+		task.Status = *req.Status
+	}
+	if req.AssigneeID != nil {
+		if *req.AssigneeID == "" {
+			task.AssigneeUserID = nil
+		} else {
+			task.AssigneeUserID = req.AssigneeID
+		}
+	}
+	if req.Deadline != nil {
+		if *req.Deadline == "" {
+			task.Deadline = nil
+		} else {
+			t, _, err := parseDeadline(*req.Deadline, time.UTC)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid deadline format (use YYYY-MM-DD)")
+				return
+			}
+			task.Deadline = &t
+		}
+	}
+
+	updated, err := s.repo.UpdateTask(r.Context(), task)
+	if err != nil {
+		s.log.Error("update task (miniapp)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }

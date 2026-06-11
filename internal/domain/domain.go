@@ -12,8 +12,9 @@ const (
 
 // User roles within a workspace.
 const (
-	RoleAdmin  = "admin"
-	RoleMember = "member"
+	RoleAdmin     = "admin"
+	RoleModerator = "moderator" // can manage tasks but not workspace settings
+	RoleMember    = "member"
 )
 
 // Board statuses, aligned with the workspace columns.
@@ -55,6 +56,9 @@ type Workspace struct {
 	DigestTime    string `yaml:"digest_time"`
 	// ConfirmMode controls who can approve/reject tasks: "admin_only" or "everyone".
 	ConfirmMode string `yaml:"confirm_mode"`
+	// PmChatID is the Telegram private chat that receives task confirmation cards.
+	// Set by a workspace admin via /start; persisted so it survives bot restarts.
+	PmChatID string `yaml:"pm_chat_id"`
 }
 
 // User is a workspace member mapped to their YouGile account.

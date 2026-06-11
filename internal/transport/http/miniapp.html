@@ -96,8 +96,19 @@
 
     /* ── Role tag ── */
     .role { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 3px 9px; border-radius: 6px; }
-    .role.admin  { background: rgba(99,102,241,.14); color: var(--btn); }
-    .role.member { background: rgba(128,128,128,.16); color: var(--hint); }
+    .role.admin     { background: rgba(99,102,241,.14); color: var(--btn); }
+    .role.moderator { background: rgba(245,158,11,.14); color: #b45309; }
+    .role.member    { background: rgba(128,128,128,.16); color: var(--hint); }
+
+    /* ── Role select (role management section) ── */
+    .role-select {
+      background: var(--bg2); border: 1.5px solid rgba(0,0,0,.1);
+      border-radius: 8px; padding: 5px 8px;
+      font-size: 13px; color: var(--text); outline: none;
+      -webkit-appearance: none; appearance: none;
+      cursor: pointer; min-width: 115px; text-align: right;
+    }
+    .role-select:focus { border-color: var(--btn); }
 
     /* ── Board (workspace) avatar in the list ── */
     .board-icon {
@@ -565,6 +576,17 @@
       <button class="btn-secondary" onclick="showReconnect()">Переподключить YouGile</button>
     </div>
 
+    <!-- Role management (admin only) -->
+    <div class="section hidden" id="dashRolesSection">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div class="section-title" style="margin-bottom:0;">Управление ролями</div>
+        <button class="btn-refresh" onclick="loadUserRoles()" title="Обновить">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+        </button>
+      </div>
+      <div id="userRolesList"></div>
+    </div>
+
     <!-- Tasks by member -->
     <div class="section" style="margin-top:20px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
@@ -579,6 +601,17 @@
   </div><!-- /dashboardSection -->
 
 </div><!-- /mainContent -->
+
+<!-- ── Bind YouGile user bottom sheet ── -->
+<div class="sheet-backdrop" id="bindBackdrop" onclick="closeBindSheet()"></div>
+<div class="edit-sheet" id="bindSheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header">
+    <span class="sheet-title">Привязать к YouGile</span>
+    <button class="sheet-close" onclick="closeBindSheet()">✕</button>
+  </div>
+  <div class="sheet-body" id="bindSheetBody"></div>
+</div>
 
 <!-- ── Edit-task bottom sheet ── -->
 <div class="sheet-backdrop" id="editBackdrop" onclick="closeEditSheet()"></div>
@@ -772,7 +805,7 @@ function renderMain() {
   el('profileName').textContent = fullName || 'Пользователь';
   if (user.username) el('profileUsername').textContent = '@' + user.username;
   setAvatar('avatarEl', user.photo_url, fullName[0]);
-  el('profileBadge').innerHTML = roleBadge(isAdmin);
+  el('profileBadge').innerHTML = roleBadge(state.role || isAdmin);
 
   // Header subtitle
   el('headerSub').textContent = isAdmin ? 'Настройка рабочей доски' : 'Информация о доске';
@@ -1023,10 +1056,10 @@ async function selectProject(projectId, projectTitle) {
 
 // roleBadge / statusBadge — corporate UI helpers (no emoji): a role tag and a
 // colored-dot connection status, reused by the home list and the board view.
-function roleBadge(isAdmin) {
-  return isAdmin
-    ? '<span class="role admin">Администратор</span>'
-    : '<span class="role member">Участник</span>';
+function roleBadge(roleOrBool) {
+  if (roleOrBool === true || roleOrBool === 'admin')     return '<span class="role admin">Администратор</span>';
+  if (roleOrBool === 'moderator')                        return '<span class="role moderator">Модератор</span>';
+  return '<span class="role member">Участник</span>';
 }
 
 function statusBadge(connected, resolved) {
@@ -1048,6 +1081,8 @@ async function loadDashboard() {
     show('dashProjectRow');
     show('dashDigestRow');
     show('dashAdminActions');
+    show('dashRolesSection');
+    loadUserRoles();
   }
 
   show('dashboardSection');
@@ -1129,6 +1164,7 @@ function renderMemberTasks(data) {
     const isOpen = idx === 0;
     const n = group.tasks.length;
 
+    const editable = canEditTasks();
     const tasksHtml = group.tasks.map(t => {
       const color = STATUS_COLOR[t.status] || 'var(--hint)';
       const label = STATUS_LABEL[t.status] || t.status;
@@ -1136,7 +1172,11 @@ function renderMemberTasks(data) {
         ? new Date(t.deadline).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
         : '';
       const dlMeta = dl ? (t.overdue ? `<span class="task-overdue">${dl} · Просрочено</span>` : dl) : '';
-      return `<div class="task-item" onclick="openEditSheet('${escHtml(t.id)}')">
+      const clickAttr = editable ? `onclick="openEditSheet('${escHtml(t.id)}')"` : '';
+      const chevron = editable
+        ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;color:var(--hint);margin-left:6px;"><polyline points="9 18 15 12 9 6"/></svg>'
+        : '';
+      return `<div class="task-item" ${clickAttr} style="${editable ? '' : 'cursor:default;'}">
         <div style="flex:1;min-width:0;">
           <div class="task-title">${escHtml(t.title)}</div>
           <div class="task-meta" style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
@@ -1144,7 +1184,7 @@ function renderMemberTasks(data) {
             ${dlMeta ? `<span style="font-size:11px;color:var(--hint);">${dlMeta}</span>` : ''}
           </div>
         </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;color:var(--hint);margin-left:6px;"><polyline points="9 18 15 12 9 6"/></svg>
+        ${chevron}
       </div>`;
     }).join('');
 
@@ -1246,7 +1286,13 @@ function escHtml(str) {
 
 let _editOrig = null; // task snapshot at open-time for change detection
 
+// Returns true if the current user can edit tasks (admin or moderator).
+function canEditTasks() {
+  return state.is_admin === true || state.role === 'admin' || state.role === 'moderator';
+}
+
 function openEditSheet(taskId) {
+  if (!canEditTasks()) return;
   el('editTaskId').value = taskId;
   el('editTitle').value = '';
   el('editDesc').value = '';
@@ -1321,10 +1367,10 @@ async function saveTask() {
   if (Object.keys(patch).length === 0) { closeEditSheet(); return; }
 
   try {
-    const res = await fetch(apiBase() + `/v1/tasks/${encodeURIComponent(taskId)}`, {
-      method: 'PATCH',
+    const res = await fetch(apiBase() + '/miniapp/update-task', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, task_id: taskId, ...patch }),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
@@ -1335,6 +1381,173 @@ async function saveTask() {
   } catch (e) {
     tg.showAlert('Ошибка при сохранении: ' + (e.message || 'попробуйте ещё раз'));
     btn.disabled = false;
+  }
+}
+
+// ── Role management (admin only) ──────────────────────────────────────────────
+
+async function loadUserRoles() {
+  const listEl = el('userRolesList');
+  listEl.innerHTML = '<div class="spinner" style="margin:12px auto;"></div>';
+  try {
+    const [usersRes, ygRes] = await Promise.all([
+      fetch(apiBase() + `/v1/workspaces/${encodeURIComponent(tenantId)}/users`),
+      fetch(apiBase() + `/v1/workspaces/${encodeURIComponent(tenantId)}/yougile-users`),
+    ]);
+    if (!usersRes.ok) throw new Error(`users HTTP ${usersRes.status}`);
+    const usersData = await usersRes.json();
+    const ygData = ygRes.ok ? await ygRes.json() : { users: [] };
+    renderUserRoles(usersData.users || [], ygData.users || []);
+  } catch (e) {
+    listEl.innerHTML = `<div class="msg err" style="margin-top:0;">Ошибка загрузки: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderUserRoles(users, ygUsers) {
+  const listEl = el('userRolesList');
+  const hostTgId = String((state.workspace || {}).host_tg_id || '');
+  const realUsers = users.filter(u => !u.tg_id.startsWith('yg:'));
+  if (realUsers.length === 0) {
+    listEl.innerHTML = '<div class="msg" style="color:var(--hint);margin-top:0;">Нет зарегистрированных участников.</div>';
+    return;
+  }
+  // Build a quick id→name map for YouGile users.
+  const ygMap = {};
+  (ygUsers || []).forEach(y => { ygMap[y.id] = y.name || y.id; });
+
+  listEl.innerHTML = '';
+  realUsers.forEach(u => {
+    const initials = (u.full_name || '?').trim().split(/\s+/).map(w => w[0] || '').slice(0, 2).join('').toUpperCase() || '?';
+    const isHost = u.tg_id === hostTgId;
+    const roleControl = isHost
+      ? '<span class="role admin" style="white-space:nowrap;font-size:10px;">Администратор</span>'
+      : `<select class="role-select" onchange="setUserRoleFromApp('${escHtml(u.tg_id)}', this.value)">` +
+          `<option value="member"${u.role === 'member' ? ' selected' : ''}>Участник</option>` +
+          `<option value="moderator"${u.role === 'moderator' ? ' selected' : ''}>Модератор</option>` +
+          `<option value="admin"${u.role === 'admin' ? ' selected' : ''}>Администратор</option>` +
+        `</select>`;
+
+    const ygName = u.yougile_user_id ? (ygMap[u.yougile_user_id] || '…') : null;
+    const bindingRow =
+      '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 14px 10px;border-top:1px solid rgba(0,0,0,.05);">' +
+        '<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--hint);">' +
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' +
+          (ygName
+            ? '<span style="color:var(--text);font-weight:500;">' + escHtml(ygName) + '</span>'
+            : '<span>Не привязан к YouGile</span>') +
+        '</div>' +
+        `<button onclick="openBindSheet('${escHtml(u.tg_id)}')" style="background:none;border:none;color:var(--link);font-size:12px;font-weight:600;cursor:pointer;padding:2px 0;">` +
+          (ygName ? 'Изменить' : 'Привязать') +
+        '</button>' +
+      '</div>';
+
+    const card = document.createElement('div');
+    card.className = 'member-card';
+    card.style.marginBottom = '8px';
+    card.innerHTML =
+      '<div style="padding:12px 14px 10px;display:flex;align-items:center;gap:12px;">' +
+        '<div class="board-icon" style="width:36px;height:36px;font-size:13px;">' + escHtml(initials) + '</div>' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div class="member-name">' + escHtml(u.full_name || '—') + '</div>' +
+          (u.tg_username ? '<div style="font-size:11px;color:var(--hint);">' + escHtml(u.tg_username) + '</div>' : '') +
+        '</div>' +
+        roleControl +
+      '</div>' +
+      bindingRow;
+    listEl.appendChild(card);
+  });
+}
+
+// ── YouGile binding sheet ─────────────────────────────────────────────────────
+
+let _bindTgId = null;
+
+function openBindSheet(tgId) {
+  _bindTgId = tgId;
+  const body = el('bindSheetBody');
+  body.innerHTML = '<div class="spinner" style="margin:16px auto;"></div>';
+  el('bindSheet').classList.add('open');
+  el('bindBackdrop').classList.add('open');
+
+  fetch(apiBase() + `/v1/workspaces/${encodeURIComponent(tenantId)}/yougile-users`)
+    .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+    .then(data => renderYougilePickerList(data.users || []))
+    .catch(e => {
+      body.innerHTML = `<div class="msg err">${escHtml(e.message)}</div>`;
+    });
+}
+
+function closeBindSheet() {
+  el('bindSheet').classList.remove('open');
+  el('bindBackdrop').classList.remove('open');
+  _bindTgId = null;
+}
+
+function renderYougilePickerList(ygUsers) {
+  const body = el('bindSheetBody');
+  body.innerHTML = '';
+
+  // Unbind option
+  const unbind = document.createElement('div');
+  unbind.className = 'project-item';
+  unbind.style.marginBottom = '6px';
+  unbind.innerHTML = '<span style="font-size:14px;color:var(--hint);">✕ &nbsp;Убрать привязку</span>';
+  unbind.onclick = () => doBindUser(_bindTgId, '');
+  body.appendChild(unbind);
+
+  if (ygUsers.length === 0) {
+    body.innerHTML += '<div class="msg" style="margin-top:0;color:var(--hint);">Нет участников YouGile.</div>';
+    return;
+  }
+
+  ygUsers.forEach(u => {
+    const initial = ((u.name || '?').trim()[0] || '?').toUpperCase();
+    const item = document.createElement('div');
+    item.className = 'project-item';
+    item.style.marginBottom = '6px';
+    item.innerHTML =
+      '<div class="board-icon" style="width:34px;height:34px;font-size:13px;">' + escHtml(initial) + '</div>' +
+      '<div style="flex:1;min-width:0;">' +
+        '<div class="project-name">' + escHtml(u.name || u.id) + '</div>' +
+        (u.email ? '<div style="font-size:11px;color:var(--hint);margin-top:2px;">' + escHtml(u.email) + '</div>' : '') +
+      '</div>';
+    item.onclick = () => doBindUser(_bindTgId, u.id);
+    body.appendChild(item);
+  });
+}
+
+async function doBindUser(tgId, yougileUserId) {
+  closeBindSheet();
+  try {
+    const res = await fetch(apiBase() + '/miniapp/bind-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, tg_id: tgId, yougile_user_id: yougileUserId }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${res.status}`);
+    }
+    loadUserRoles();
+  } catch (e) {
+    tg.showAlert('Не удалось обновить привязку: ' + (e.message || 'ошибка'));
+  }
+}
+
+async function setUserRoleFromApp(tgId, role) {
+  try {
+    const res = await fetch(apiBase() + '/miniapp/set-role', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, tg_id: tgId, role }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${res.status}`);
+    }
+  } catch (e) {
+    tg.showAlert('Не удалось обновить роль: ' + (e.message || 'ошибка'));
+    loadUserRoles();
   }
 }
 </script>
