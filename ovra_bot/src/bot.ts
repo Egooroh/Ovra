@@ -930,7 +930,14 @@ bot.on('document', async (ctx) => {
 // Telegram шлёт голосовые в формате OGG/Opus 48kHz — именно то, что ожидает
 // синхронный REST API SpeechKit (ограничение: ≤ 60 сек на один запрос).
 bot.on('voice', async (ctx) => {
-    if (ctx.chat.type === 'private') return;
+    // Голосовой ОТВЕТ на карточку задачи обрабатываем и в группе, и в личке
+    // (в личку карточки приходят при confirm target = pm). Прочие голосовые в
+    // личке игнорируем, чтобы не плодить «задачи» из личных надиктовок.
+    const replyTo = (ctx.message as any).reply_to_message;
+    const cardReplyTaskId = replyTo
+        ? cardMessages.get(`${ctx.chat.id}:${replyTo.message_id}`)
+        : undefined;
+    if (ctx.chat.type === 'private' && !cardReplyTaskId) return;
 
     const voice = ctx.message.voice;
     if (voice.duration > 29) {
@@ -965,8 +972,16 @@ bot.on('voice', async (ctx) => {
         }
 
         console.log(`[voice] msg_id=${ctx.message.message_id} text="${text}"`);
-        // Сначала пробуем как смену статуса существующей задачи («лендинг готов»),
-        // и только потом — как новую задачу.
+
+        // Голосовой ответ на карточку задачи → та же логика, что у текстового
+        // ответа (правка полей или перемещение в колонку).
+        if (cardReplyTaskId) {
+            await handleCardReply(ctx, ctx.chat.id, replyTo.message_id, ctx.message.message_id, cardReplyTaskId, text, ctx.from?.id);
+            return;
+        }
+
+        // Иначе: сначала пробуем как перемещение существующей задачи
+        // («лендинг готов»), и только потом — как новую задачу.
         if (await tryHandleTaskMove(ctx, text)) return;
         await processTaskAndConfirm(ctx, text);
     } catch (e) {
@@ -1034,26 +1049,28 @@ bot.action(/^edit_hint_(.+)$/, async (ctx) => {
     );
 });
 
-// Reply-перехват: если пользователь ответил на карточку задачи — редактируем её.
-bot.use(async (ctx, next) => {
-    const msg = ctx.message as any;
-    if (!msg?.text || !msg.reply_to_message) return next();
-
-    const chatId = msg.chat.id;
-    const replyMsgId: number = msg.reply_to_message.message_id;
-    const cardKey = `${chatId}:${replyMsgId}`;
-    const taskId = cardMessages.get(cardKey);
-    if (!taskId) return next();
-
+// handleCardReply — единая обработка ОТВЕТА на карточку задачи (правка полей или
+// перемещение в колонку). Вызывается и из текстового middleware, и из голосового
+// обработчика (с распознанным текстом). replyMsgId — id карточки бота; userMsgId —
+// id сообщения пользователя (для ответов об ошибках).
+async function handleCardReply(
+    ctx: Context,
+    chatId: number,
+    replyMsgId: number,
+    userMsgId: number,
+    taskId: string,
+    text: string,
+    fromId?: number,
+): Promise<void> {
     // Ответ-перемещение карточки («смени на в работе», «готово», «в тестирование»).
     // Гасим, если в тексте есть явный маркер ПРАВКИ полей (переименуй/дедлайн/…),
     // чтобы «переименуй в "X готово"» не трактовалось как смена статуса.
-    if (looksLikeStatusOrMove(msg.text) && !EDIT_INSTRUCTION_RE.test(msg.text)) {
+    if (looksLikeStatusOrMove(text) && !EDIT_INSTRUCTION_RE.test(text)) {
         if (UUID_RE.test(taskId)) {
-            await handleReplyMove(ctx, msg.text, chatId, taskId);
+            await handleReplyMove(ctx, text, chatId, taskId);
         } else {
             // Задача ещё не одобрена (нет карточки в YouGile) — статус менять рано.
-            await ctx.telegram.sendMessage(chatId, 'ℹ️ Задача ещё не создана — сначала нажмите ✅, потом можно менять статус.', { reply_parameters: { message_id: msg.message_id } });
+            await ctx.telegram.sendMessage(chatId, 'ℹ️ Задача ещё не создана — сначала нажмите ✅, потом можно менять статус.', { reply_parameters: { message_id: userMsgId } });
         }
         return;
     }
@@ -1063,19 +1080,19 @@ bot.use(async (ctx, next) => {
         const dbTask = await getTask(taskId).catch(() => null);
         if (!dbTask) {
             await ctx.telegram.sendMessage(chatId, '⚠️ Задача не найдена.', {
-                reply_parameters: { message_id: msg.message_id },
+                reply_parameters: { message_id: userMsgId },
             });
             return;
         }
         const currentTask: ParsedTask = { isTask: true, title: dbTask.title, description: dbTask.description };
         let patch: Awaited<ReturnType<typeof parseTaskEdit>>;
-        try { patch = await parseTaskEdit(currentTask, msg.text); }
+        try { patch = await parseTaskEdit(currentTask, text); }
         catch {
-            await ctx.telegram.sendMessage(chatId, '❌ Не удалось распознать правку.', { reply_parameters: { message_id: msg.message_id } });
+            await ctx.telegram.sendMessage(chatId, '❌ Не удалось распознать правку.', { reply_parameters: { message_id: userMsgId } });
             return;
         }
         if (Object.keys(patch).length === 0) {
-            await ctx.telegram.sendMessage(chatId, '🤔 Не понял, что изменить. Опишите точнее.', { reply_parameters: { message_id: msg.message_id } });
+            await ctx.telegram.sendMessage(chatId, '🤔 Не понял, что изменить. Опишите точнее.', { reply_parameters: { message_id: userMsgId } });
             return;
         }
         await updateTask(taskId, patch).catch(() => null);
@@ -1087,20 +1104,19 @@ bot.use(async (ctx, next) => {
     const pending = pendingTasks.get(taskId);
     if (!pending) {
         await ctx.telegram.sendMessage(chatId, '⚠️ Задача уже обработана или устарела.', {
-            reply_parameters: { message_id: msg.message_id },
+            reply_parameters: { message_id: userMsgId },
         });
         return;
     }
 
     // Проверяем права: редактировать может только admin / moderator / TG-admin.
-    const userId: number = msg.from?.id;
-    if (userId) {
+    if (fromId) {
         const ws = await resolveTenant(pending.originChatId ?? chatId).catch(() => null);
         const mode = ws?.confirm_mode ?? 'admin_only';
-        const allowed = await canManageTasks(pending.originChatId ?? chatId, userId, pending.tenantId, mode);
+        const allowed = await canManageTasks(pending.originChatId ?? chatId, fromId, pending.tenantId, mode);
         if (!allowed) {
             await ctx.telegram.sendMessage(chatId, '⛔ Редактировать задачи могут только администраторы и модераторы.', {
-                reply_parameters: { message_id: msg.message_id },
+                reply_parameters: { message_id: userMsgId },
             });
             return;
         }
@@ -1109,17 +1125,17 @@ bot.use(async (ctx, next) => {
     // Парсим правку через AI.
     let patch: Awaited<ReturnType<typeof parseTaskEdit>>;
     try {
-        patch = await parseTaskEdit(pending.task, msg.text);
+        patch = await parseTaskEdit(pending.task, text);
     } catch {
         await ctx.telegram.sendMessage(chatId, '❌ Не удалось распознать правку. Попробуйте ещё раз.', {
-            reply_parameters: { message_id: msg.message_id },
+            reply_parameters: { message_id: userMsgId },
         });
         return;
     }
 
     if (Object.keys(patch).length === 0) {
         await ctx.telegram.sendMessage(chatId, '🤔 Не понял, что именно изменить. Попробуйте описать точнее.', {
-            reply_parameters: { message_id: msg.message_id },
+            reply_parameters: { message_id: userMsgId },
         });
         return;
     }
@@ -1147,6 +1163,20 @@ bot.use(async (ctx, next) => {
     await ctx.telegram.sendMessage(chatId, `✏️ Обновлено: ${changed}.`, {
         reply_parameters: { message_id: replyMsgId },
     });
+}
+
+// Reply-перехват: если пользователь ТЕКСТОМ ответил на карточку задачи — правим её.
+// (Голосовые ответы на карточку обрабатывает bot.on('voice') тем же handleCardReply.)
+bot.use(async (ctx, next) => {
+    const msg = ctx.message as any;
+    if (!msg?.text || !msg.reply_to_message) return next();
+
+    const chatId = msg.chat.id;
+    const replyMsgId: number = msg.reply_to_message.message_id;
+    const taskId = cardMessages.get(`${chatId}:${replyMsgId}`);
+    if (!taskId) return next();
+
+    await handleCardReply(ctx, chatId, replyMsgId, msg.message_id, taskId, msg.text, msg.from?.id);
 });
 
 bot.on("text", async (ctx, next) => {
