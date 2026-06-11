@@ -56,6 +56,9 @@ type Workspace struct {
 	DigestTime    string `yaml:"digest_time"`
 	// ConfirmMode controls who can approve/reject tasks: "admin_only" or "everyone".
 	ConfirmMode string `yaml:"confirm_mode"`
+	// TaskDetection controls how tasks are detected in chat: "ai" (every message)
+	// or "heuristic" (keyword pre-filter before AI).
+	TaskDetection string `yaml:"task_detection"`
 	// PmChatID is the Telegram private chat that receives task confirmation cards.
 	// Set by a workspace admin via /start; persisted so it survives bot restarts.
 	PmChatID string `yaml:"pm_chat_id"`

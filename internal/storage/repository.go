@@ -36,6 +36,8 @@ type Repository interface {
 	SetDigestSettings(ctx context.Context, tenantID string, enabled bool, digestTime string) error
 	// SetConfirmMode updates the task-confirmation mode for a workspace.
 	SetConfirmMode(ctx context.Context, tenantID string, mode string) error
+	// SetTaskDetection updates the task-detection mode ("ai" or "heuristic").
+	SetTaskDetection(ctx context.Context, tenantID string, mode string) error
 	// SetWorkspacePmChatId stores the private-chat ID that receives confirmation cards.
 	SetWorkspacePmChatId(ctx context.Context, tenantID, pmChatID string) error
 

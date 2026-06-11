@@ -29,7 +29,8 @@ type workspaceResponse struct {
 	BoardResolved    bool   `json:"board_resolved"` // all four columns mapped
 	DigestEnabled    bool   `json:"digest_enabled"`
 	DigestTime       string `json:"digest_time"`
-	ConfirmMode      string `json:"confirm_mode"` // "admin_only" | "everyone"
+	ConfirmMode      string `json:"confirm_mode"`   // "admin_only" | "everyone"
+	TaskDetection    string `json:"task_detection"` // "ai" | "heuristic"
 	PmChatID         string `json:"pm_chat_id"`   // private chat that receives confirmation cards
 }
 
@@ -201,6 +202,7 @@ func (s *Server) workspaceResp(ctx context.Context, ws domain.Workspace) workspa
 		DigestTime:       digestTime,
 		ConfirmMode:      confirmMode(ws.ConfirmMode),
 		PmChatID:         ws.PmChatID,
+		TaskDetection:    taskDetection(ws.TaskDetection),
 	}
 }
 
@@ -209,6 +211,38 @@ func confirmMode(m string) string {
 		return "everyone"
 	}
 	return "admin_only"
+}
+
+func taskDetection(m string) string {
+	if m == "ai" {
+		return "ai"
+	}
+	return "heuristic"
+}
+
+// handleSetTaskDetection updates the task-detection mode for a workspace.
+func (s *Server) handleSetTaskDetection(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.Mode != "ai" && req.Mode != "heuristic" {
+		writeError(w, http.StatusBadRequest, `mode must be "ai" or "heuristic"`)
+		return
+	}
+	if err := s.repo.SetTaskDetection(r.Context(), tenant, req.Mode); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set task detection", "tenant", tenant, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"task_detection": req.Mode})
 }
 
 // handleSetConfirmMode updates the task-confirmation mode for a workspace.

@@ -7,10 +7,10 @@ import {
     listYougileMembers, registerUser, scheduleCallInOvra,
     saveYougileCreds, listYougileProjects, setWorkspaceProject, listYougileCompanies,
     listCalendarAccounts, addCalendarAccount, deleteCalendarAccount,
-    deleteTask, getTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
+    deleteTask, getTask, updateTask, getDigest, getTrash, clearTrash, syncWorkspace, listTasks,
     setPmChatId, setUserRole, listWorkspaceUsers, getUserByTgId,
-    setConfirmMode,
-    type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany
+    setConfirmMode, updateDigestSettings,
+    type YougileMember, type YougileProject, type CalendarAccount, type YougileCompany, type DigestData
 } from "./services/backend.js";
 import crypto from "crypto";
 import dotenv from 'dotenv';
@@ -59,6 +59,9 @@ let activePmChatId: string | number | undefined = process.env.PM_CHAT_ID || unde
 
 const recentMessages = new Map<number, string>();
 
+// Последние 10 сообщений на чат — для контекста при разборе задачи.
+const chatHistory = new Map<number, string[]>();
+
 // Кэшируем текст/подпись КАЖДОГО группового сообщения до остальных обработчиков —
 // ранний return в каком-нибудь хендлере не должен оставлять кэш пустым,
 // иначе реакция на такое сообщение не найдёт текст.
@@ -68,6 +71,11 @@ bot.use((ctx, next) => {
         const text: string | undefined = msg.text ?? msg.caption;
         if (text) {
             recentMessages.set(msg.message_id, text);
+            const chatId = ctx.chat!.id;
+            const hist = chatHistory.get(chatId) ?? [];
+            hist.push(text);
+            if (hist.length > 10) hist.shift();
+            chatHistory.set(chatId, hist);
             // Подрезаем старые записи (Map хранит порядок вставки), а не чистим
             // кэш целиком — свежие сообщения должны переживать переполнение.
             if (recentMessages.size > 2000) {
@@ -86,13 +94,39 @@ interface PendingTask { task: ParsedTask; tenantId: string; originChatId?: numbe
 const pendingTasks = new Map<string, PendingTask>();
 
 // Карта "${chatId}:${messageId}" → taskId для перехвата ответов-правок на карточки.
-const cardMessages = new Map<string, string>();
+// Персистируется в файл чтобы пережить рестарт бота.
+const CARD_MESSAGES_FILE = path.join(process.cwd(), 'data', 'card_messages.json');
+const cardMessages = new Map<string, string>((() => {
+    try {
+        const raw = fs.readFileSync(CARD_MESSAGES_FILE, 'utf8');
+        return Object.entries(JSON.parse(raw)) as [string, string][];
+    } catch { return []; }
+})());
+
+function saveCardMessages() {
+    try {
+        fs.mkdirSync(path.dirname(CARD_MESSAGES_FILE), { recursive: true });
+        fs.writeFileSync(CARD_MESSAGES_FILE, JSON.stringify(Object.fromEntries(cardMessages)));
+    } catch (e) { console.error('saveCardMessages:', e); }
+}
 
 function clearCardEntry(taskId: string) {
     for (const [key, tid] of cardMessages) {
         if (tid === taskId) cardMessages.delete(key);
     }
+    saveCardMessages();
 }
+
+// После одобрения задачи обновляем ключ с локального hex-id на backend UUID,
+// чтобы ответ на одобренную карточку мог найти задачу в БД.
+function promoteCardEntry(localId: string, backendId: string) {
+    for (const [key, tid] of cardMessages) {
+        if (tid === localId) cardMessages.set(key, backendId);
+    }
+    saveCardMessages();
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Восстанавливает PendingTask из БД, если он был потерян при рестарте бота.
 // Возвращает null, если задача не найдена или уже не в статусе pending.
@@ -494,9 +528,9 @@ function buildCardText(task: ParsedTask): string {
 
 function buildCardKeyboard(taskId: string) {
     return Markup.inlineKeyboard([
-        Markup.button.callback('✅ Одобрить', `approve_${taskId}`),
-        Markup.button.callback('✏️ Редактировать', `edit_hint_${taskId}`),
-        Markup.button.callback('❌ Отклонить', `reject_${taskId}`),
+        Markup.button.callback('✅', `approve_${taskId}`),
+        Markup.button.callback('✏️', `edit_hint_${taskId}`),
+        Markup.button.callback('❌', `reject_${taskId}`),
     ]);
 }
 
@@ -507,7 +541,7 @@ function resolveSelfAssignee(sender: { first_name: string; last_name?: string; u
     return [sender.first_name, sender.last_name].filter(Boolean).join(' ');
 }
 
-async function processTaskAndConfirm(ctx: Context, text: string, force = false) {
+async function processTaskAndConfirm(ctx: Context, text: string, force = false, context: string[] = []) {
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
@@ -522,7 +556,7 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
         return;
     }
 
-    const tasks = await parseMessageWithAI(text);
+    const tasks = await parseMessageWithAI(text, context);
 
     // force=true (реакция ✍️/🔥) — создаём задачу даже если ИИ ничего не нашёл.
     if (force && tasks.length === 0) {
@@ -568,6 +602,7 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false) 
                 ...buildCardKeyboard(taskId),
             });
             cardMessages.set(`${targetChatId}:${sent.message_id}`, taskId);
+            saveCardMessages();
         } catch (error) {
             console.error("❌ Ошибка отправки подтверждения.", error);
         }
@@ -872,6 +907,32 @@ bot.use(async (ctx, next) => {
     const taskId = cardMessages.get(cardKey);
     if (!taskId) return next();
 
+    // UUID в cardMessages → задача уже одобрена, редактируем через API напрямую.
+    if (UUID_RE.test(taskId)) {
+        const dbTask = await getTask(taskId).catch(() => null);
+        if (!dbTask) {
+            await ctx.telegram.sendMessage(chatId, '⚠️ Задача не найдена.', {
+                reply_parameters: { message_id: msg.message_id },
+            });
+            return;
+        }
+        const currentTask: ParsedTask = { isTask: true, title: dbTask.title, description: dbTask.description };
+        let patch: Awaited<ReturnType<typeof parseTaskEdit>>;
+        try { patch = await parseTaskEdit(currentTask, msg.text); }
+        catch {
+            await ctx.telegram.sendMessage(chatId, '❌ Не удалось распознать правку.', { reply_parameters: { message_id: msg.message_id } });
+            return;
+        }
+        if (Object.keys(patch).length === 0) {
+            await ctx.telegram.sendMessage(chatId, '🤔 Не понял, что изменить. Опишите точнее.', { reply_parameters: { message_id: msg.message_id } });
+            return;
+        }
+        await updateTask(taskId, patch).catch(() => null);
+        const changed = Object.keys(patch).map(k => ({ title: 'название', description: 'описание', deadline: 'дедлайн' } as Record<string, string>)[k]).filter(Boolean).join(', ');
+        await ctx.telegram.sendMessage(chatId, `✏️ Обновлено: ${changed}.`, { reply_parameters: { message_id: replyMsgId } });
+        return;
+    }
+
     const pending = pendingTasks.get(taskId);
     if (!pending) {
         await ctx.telegram.sendMessage(chatId, '⚠️ Задача уже обработана или устарела.', {
@@ -1050,10 +1111,13 @@ bot.on("text", async (ctx, next) => {
         return;
     }
 
-    // Если похоже на задачу — разбираем (эвристика бережёт токены).
-    if (isPotentialTask(message.text)) {
-        await processTaskAndConfirm(ctx, message.text);
-    }
+    // Режим детекции: 'ai' — каждое сообщение в AI, 'heuristic' — сначала фильтр.
+    const ws = await resolveTenant(ctx.chat.id).catch(() => null);
+    const detectionMode = ws?.task_detection ?? 'heuristic';
+    if (detectionMode === 'heuristic' && !isPotentialTask(message.text)) return;
+    const hist = chatHistory.get(ctx.chat.id) ?? [];
+    const context = hist.slice(0, -1); // все кроме текущего
+    await processTaskAndConfirm(ctx, message.text, false, context);
 });
 
 // ---- Реакции ✍️/🔥 → задача из сообщения ----
@@ -1150,8 +1214,8 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
             {
                 parse_mode: 'Markdown',
                 ...Markup.inlineKeyboard([
-                    Markup.button.callback('✅ Да, добавить', `force_${taskId}`),
-                    Markup.button.callback('❌ Нет', `reject_${taskId}`)
+                    Markup.button.callback('✅', `force_${taskId}`),
+                    Markup.button.callback('❌', `reject_${taskId}`)
                 ])
             }
         );
@@ -1171,7 +1235,7 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
         const sent = await ctx.editMessageText(successText, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                Markup.button.callback('🗑️ Удалить', `del_task_${backendId}`)
+                Markup.button.callback('🗑️', `del_task_${backendId}`)
             ])
         });
         if (typeof sent === 'object' && sent && 'message_id' in sent) {
@@ -1196,7 +1260,7 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
     }
 
     pendingTasks.delete(taskId);
-    clearCardEntry(taskId);
+    if (backendId) promoteCardEntry(taskId, backendId); else clearCardEntry(taskId);
 }
 
 // guardedSubmit запускает submitTask с защитой от двойного клика и уносит
@@ -1717,8 +1781,8 @@ export async function handleMeetingDone(payload: MeetingDonePayload): Promise<vo
         await bot.telegram.sendMessage(chatId, taskText, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                Markup.button.callback('✅ Добавить', `mtask_ok_${taskId}`),
-                Markup.button.callback('❌ Пропустить', `mtask_no_${taskId}`),
+                Markup.button.callback('✅', `mtask_ok_${taskId}`),
+                Markup.button.callback('❌', `mtask_no_${taskId}`),
             ]),
         });
     }

@@ -90,6 +90,7 @@ export interface WorkspaceInfo {
     digest_enabled: boolean;
     digest_time: string;      // "HH:MM"
     confirm_mode: 'admin_only' | 'everyone';
+    task_detection: 'ai' | 'heuristic';
     pm_chat_id: string;       // private chat that receives confirmation cards
 }
 
@@ -170,6 +171,23 @@ export async function getTask(taskId: string): Promise<TaskRecord | null> {
     return res.json() as Promise<TaskRecord>;
 }
 
+export async function updateTask(taskId: string, patch: {
+    title?: string;
+    description?: string;
+    deadline?: string;
+}): Promise<void> {
+    const body: Record<string, string> = {};
+    if (patch.title !== undefined) body.title = patch.title;
+    if (patch.description !== undefined) body.description = patch.description;
+    if (patch.deadline !== undefined) body.deadline = patch.deadline;
+    const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`updateTask HTTP ${res.status}`);
+}
+
 // --- Дайджест ---
 
 export interface DigestTask {
@@ -245,6 +263,14 @@ export async function getTrash(tenantId: string): Promise<any[]> {
     if (!res.ok) throw new Error(`getTrash HTTP ${res.status}`);
     const data: any = await res.json();
     return data.tasks || [];
+}
+
+export async function setTaskDetection(tenantId: string, mode: 'ai' | 'heuristic'): Promise<void> {
+    const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/task-detection`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
+        body: JSON.stringify({ mode }),
+    });
+    if (!res.ok) throw new Error(`setTaskDetection HTTP ${res.status}`);
 }
 
 export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'everyone'): Promise<void> {

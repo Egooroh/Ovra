@@ -12,6 +12,7 @@ const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     httpAgent: agent,
+    timeout: 10_000,
 });
 
 export interface ParsedTask {
@@ -24,33 +25,30 @@ export interface ParsedTask {
 
 function buildSystemPrompt(): string {
     const today = new Date().toISOString().slice(0, 10);
-    return `
-Это сообщение из рабочего чата. Найди ВСЕ задачи в сообщении — каждую отдельно.
+    return `Ты анализируешь сообщения из рабочего чата и извлекаешь КОНКРЕТНЫЕ задачи.
 
-Верни ТОЛЬКО JSON-объект (без пояснений, без markdown):
-{
-  "tasks": [
-    {
-      "title": "краткое название задачи",
-      "assignee": "имя исполнителя или пустая строка",
-      "deadline": "дата",
-      "description": "описание"
-    }
-  ]
-}
+Верни ТОЛЬКО JSON (без markdown, без пояснений):
+{"tasks": [{"title": "...", "assignee": "...", "deadline": "...", "description": "..."}]}
 
-Если задач нет — верни {"tasks": []}.
+Если задач нет — {"tasks": []}.
 
-Сегодня ${today}. Поле deadline — АБСОЛЮТНАЯ дата:
-- без времени → YYYY-MM-DD
-- с временем → YYYY-MM-DDTHH:mm
-- не указан → ""
+ЗАДАЧА — это конкретное поручение с понятным действием:
+  ✅ "Даниил, подготовь презентацию к вечеру" → задача
+  ✅ "купить макбук, задача на @user, до конца дня" → задача
+  ✅ "этим займется иван до 5 числа" + контекст про лендинг → задача "Лендинг, Иван, 5-е"
+  ❌ "нужно сделать до конца месяца" — непонятно ЧТО делать → не задача
+  ❌ "нужно сделать лендинг" без исполнителя — предложение, не поручение → не задача
+  ❌ "ок", "понял", "спасибо", светская беседа → не задача
+  ❌ обсуждение без конкретного поручения → не задача
 
+Если сообщение ссылается на предыдущее ("этим", "это", "тем", "тут") — ищи тему в контексте разговора.
+
+Сегодня ${today}. Поле deadline: YYYY-MM-DD или YYYY-MM-DDTHH:mm, пустая строка если не указан.
 Правила:
-- Каждая задача — отдельный элемент массива, не объединяй несколько в одну
-- Если исполнитель — местоимение "я" — оставь строго "я" (не меняй)
-- Если исполнитель не назван — пустая строка
-`;
+- Каждое поручение — отдельный элемент
+- Исполнитель "я" — оставить строго "я"
+- Нет исполнителя — пустая строка
+- Нет чёткого действия → {"tasks": []}`;
 }
 
 // Partial update returned by parseTaskEdit — only changed fields.
@@ -58,11 +56,21 @@ export type TaskPatch = Partial<Pick<ParsedTask, 'title' | 'assignee' | 'deadlin
 
 export async function parseTaskEdit(current: ParsedTask, editText: string): Promise<TaskPatch> {
     const today = new Date().toISOString().slice(0, 10);
-    const systemPrompt = `Сегодня ${today}. Пользователь хочет отредактировать задачу.
-Верни ТОЛЬКО JSON с полями, которые нужно изменить (не включай поля, которые остаются прежними).
-Формат дедлайна: YYYY-MM-DD или YYYY-MM-DDTHH:mm. Пустая строка означает "убрать дедлайн".
-Если ничего не изменилось — верни {}.
-Пример ответа: {"title": "Новое название", "assignee": "Иван"}`;
+    const systemPrompt = `Сегодня ${today}. Пользователь редактирует задачу. Верни ТОЛЬКО JSON с полями которые нужно изменить.
+
+Правила:
+- Не включай поля которые остаются прежними
+- Если ничего не изменилось — верни {}
+- Дедлайн: YYYY-MM-DD или YYYY-MM-DDTHH:mm, пустая строка = убрать
+- Если пользователь ДОБАВЛЯЕТ новое действие к задаче («добавляется», «ещё нужно», «плюс», «также») — обнови TITLE чтобы он отражал полный объём работы, и обнови description
+- Если пользователь ПЕРЕИМЕНОВЫВАЕТ — обнови только title
+- Если уточняет детали без смены сути — обнови только description
+
+Примеры:
+  «переименуй в Отчёт Q2» → {"title": "Отчёт Q2"}
+  «добавляется ещё депнуть в прод» → {"title": "...текущее + и депнуть в прод", "description": "..."}
+  «исполнитель Иван» → {"assignee": "Иван"}
+  «дедлайн до пятницы» → {"deadline": "YYYY-MM-DD"}`;
 
     const userPrompt = `Текущая задача:
 - Название: ${current.title || '—'}
@@ -79,6 +87,7 @@ export async function parseTaskEdit(current: ParsedTask, editText: string): Prom
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userPrompt },
             ],
+            max_tokens: 512,
         });
         let raw = completion.choices[0]?.message?.content?.trim() ?? '{}';
         raw = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -90,16 +99,21 @@ export async function parseTaskEdit(current: ParsedTask, editText: string): Prom
     }
 }
 
-export async function parseMessageWithAI(message: string): Promise<ParsedTask[]> {
+export async function parseMessageWithAI(message: string, context: string[] = []): Promise<ParsedTask[]> {
     try {
         console.log("⏳ Отправляю запрос в OpenRouter...");
+
+        const userContent = context.length > 0
+            ? `Контекст предыдущих сообщений:\n${context.map(m => `- ${m}`).join('\n')}\n\nТекущее сообщение:\n${message}`
+            : message;
 
         const completion = await openai.chat.completions.create({
             model: process.env.AI_MODEL || "mistralai/mistral-7b-instruct:free",
             messages: [
                 { role: "system", content: buildSystemPrompt() },
-                { role: "user", content: message }
-            ]
+                { role: "user", content: userContent }
+            ],
+            max_tokens: 2048,
         });
 
         let resultText = completion.choices[0]?.message?.content;

@@ -74,12 +74,12 @@ func (p *Postgres) GetWorkspace(ctx context.Context, id string) (domain.Workspac
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode, pm_chat_id
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id, task_detection
 		FROM workspaces WHERE id = $1`, id).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
 			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
-			&ws.PmChatID)
+			&ws.PmChatID, &ws.TaskDetection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -95,12 +95,12 @@ func (p *Postgres) GetWorkspaceByChat(ctx context.Context, chatID string) (domai
 	err := p.pool.QueryRow(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode, pm_chat_id
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id, task_detection
 		FROM workspaces WHERE chat_id = $1 LIMIT 1`, chatID).
 		Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
 			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
-			&ws.PmChatID)
+			&ws.PmChatID, &ws.TaskDetection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Workspace{}, ErrNotFound
 	}
@@ -145,7 +145,7 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, chat_id, name, yougile_project_id,
 		       col_todo, col_in_progress, col_review, col_done, host_tg_id, timezone,
-		       digest_enabled, digest_time, confirm_mode, pm_chat_id
+		       digest_enabled, digest_time, confirm_mode, pm_chat_id, task_detection
 		FROM workspaces
 		WHERE yougile_api_token_enc IS NOT NULL`)
 	if err != nil {
@@ -158,7 +158,7 @@ func (p *Postgres) ListWorkspaces(ctx context.Context) ([]domain.Workspace, erro
 		if err := rows.Scan(&ws.ID, &ws.ChatID, &ws.Name, &ws.YougileProjectID,
 			&ws.Columns.Todo, &ws.Columns.InProgress, &ws.Columns.Review, &ws.Columns.Done,
 			&ws.HostTgID, &ws.Timezone, &ws.DigestEnabled, &ws.DigestTime, &ws.ConfirmMode,
-			&ws.PmChatID); err != nil {
+			&ws.PmChatID, &ws.TaskDetection); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		out = append(out, ws)
@@ -186,6 +186,20 @@ func (p *Postgres) SetDigestSettings(ctx context.Context, tenantID string, enabl
 		tenantID, enabled, digestTime)
 	if err != nil {
 		return fmt.Errorf("set digest settings: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetTaskDetection updates the task-detection mode for a workspace.
+func (p *Postgres) SetTaskDetection(ctx context.Context, tenantID string, mode string) error {
+	ct, err := p.pool.Exec(ctx,
+		`UPDATE workspaces SET task_detection = $2 WHERE id = $1`,
+		tenantID, mode)
+	if err != nil {
+		return fmt.Errorf("set task detection: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound

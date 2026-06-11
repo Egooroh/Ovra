@@ -56,8 +56,12 @@ async function launchBot(attempt = 1): Promise<void> {
 launchBot();
 
 // Плавная остановка
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+function shutdown(signal: string) {
+    bot.stop(signal);
+    server.close();
+}
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
 
 // ---- Внутренний HTTP-сервер для приёма вебхуков от бэкенда ----
 
