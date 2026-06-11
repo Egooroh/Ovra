@@ -760,3 +760,54 @@ func (s *Server) handleMiniAppUpdateTask(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/set-timezone
+// ---------------------------------------------------------------------------
+
+type miniappSetTimezoneRequest struct {
+	InitData string `json:"init_data"`
+	Timezone string `json:"timezone"` // IANA, e.g. "Asia/Omsk"
+}
+
+// handleMiniAppSetTimezone verifies the caller's Telegram identity and stores
+// their IANA timezone across all workspaces. Called silently on mini-app load.
+func (s *Server) handleMiniAppSetTimezone(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappSetTimezoneRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.Timezone == "" {
+		writeError(w, http.StatusBadRequest, "init_data and timezone are required")
+		return
+	}
+	if _, err := time.LoadLocation(req.Timezone); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid IANA timezone: "+req.Timezone)
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	user, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tgIDStr := fmt.Sprintf("%d", user.ID)
+	if err := s.repo.UpdateUserTimezoneGlobal(r.Context(), tgIDStr, req.Timezone); err != nil {
+		s.log.Error("set timezone (miniapp)", "tg_id", tgIDStr, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"tg_id": tgIDStr, "timezone": req.Timezone})
+}

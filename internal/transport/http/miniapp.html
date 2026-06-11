@@ -739,6 +739,16 @@ let state = {}; // { user, workspace, isAdmin }
     return;
   }
 
+  // Silently auto-detect and persist the user's timezone (fire-and-forget).
+  const detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (detectedTz) {
+    fetch(apiBase() + '/miniapp/set-timezone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, timezone: detectedTz }),
+    }).catch(() => {});
+  }
+
   // No tenant in the URL → opened from the menu button: show profile + boards.
   if (!tenantId) {
     initHome();

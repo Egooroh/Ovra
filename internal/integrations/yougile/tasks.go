@@ -63,6 +63,37 @@ func (c *Client) UpdateTask(ctx context.Context, token, id string, req UpdateTas
 	return c.do(ctx, "PUT", "/tasks/"+id, token, req, nil)
 }
 
+// UpdateTaskFields syncs title, description, assigned users and deadline to a
+// YouGile card. Only non-nil parameters are included in the request body.
+// Pass clearDeadline=true to explicitly remove the deadline (sends null).
+func (c *Client) UpdateTaskFields(ctx context.Context, token, id string, title, description *string, assigned []string, deadline *Deadline, clearDeadline bool) error {
+	if token == "" {
+		return errors.New("yougile: missing token")
+	}
+	if id == "" {
+		return errors.New("yougile: missing task id")
+	}
+	body := map[string]any{}
+	if title != nil {
+		body["title"] = *title
+	}
+	if description != nil {
+		body["description"] = *description
+	}
+	if assigned != nil {
+		body["assigned"] = assigned
+	}
+	if clearDeadline {
+		body["deadline"] = nil
+	} else if deadline != nil {
+		body["deadline"] = deadline
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	return c.do(ctx, "PUT", "/tasks/"+id, token, body, nil)
+}
+
 // MoveTask moves a card to another column.
 func (c *Client) MoveTask(ctx context.Context, token, id, columnID string) error {
 	return c.UpdateTask(ctx, token, id, UpdateTaskRequest{ColumnID: &columnID})

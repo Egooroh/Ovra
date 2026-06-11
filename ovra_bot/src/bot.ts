@@ -62,6 +62,9 @@ const recentMessages = new Map<number, string>();
 // Последние 10 сообщений на чат — для контекста при разборе задачи.
 const chatHistory = new Map<number, string[]>();
 
+// Последняя подтверждённая задача по чату — чтобы AI не дублировал её как новую.
+const lastConfirmedTask = new Map<number, { title: string; ts: number }>();
+
 // Кэшируем текст/подпись КАЖДОГО группового сообщения до остальных обработчиков —
 // ранний return в каком-нибудь хендлере не должен оставлять кэш пустым,
 // иначе реакция на такое сообщение не найдёт текст.
@@ -556,7 +559,15 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false, 
         return;
     }
 
-    const tasks = await parseMessageWithAI(text, context);
+    // Если недавно (< 10 мин) в этом чате уже создали задачу, сообщаем об этом AI —
+    // чтобы он не интерпретировал уточнения как создание новой задачи.
+    const recent = lastConfirmedTask.get(chatId);
+    const aiContext = [...context];
+    if (recent && Date.now() - recent.ts < 10 * 60 * 1000) {
+        aiContext.unshift(`[ЗАДАЧА УЖЕ СОЗДАНА: "${recent.title}"]`);
+    }
+
+    const tasks = await parseMessageWithAI(text, aiContext);
 
     // force=true (реакция ✍️/🔥) — создаём задачу даже если ИИ ничего не нашёл.
     if (force && tasks.length === 0) {
@@ -1261,6 +1272,11 @@ async function submitTask(ctx: Context, taskId: string, pending: PendingTask, fo
 
     pendingTasks.delete(taskId);
     if (backendId) promoteCardEntry(taskId, backendId); else clearCardEntry(taskId);
+
+    // Запоминаем задачу для исходного чата — AI не будет создавать её повторно.
+    if (pending.originChatId) {
+        lastConfirmedTask.set(pending.originChatId, { title, ts: Date.now() });
+    }
 }
 
 // guardedSubmit запускает submitTask с защитой от двойного клика и уносит

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ovra/internal/domain"
+	"ovra/internal/integrations/yougile"
 	"ovra/internal/service"
 	"ovra/internal/storage"
 )
@@ -229,9 +230,15 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sync YouGile card column when status changed (best-effort, does not affect response).
+	// Sync YouGile card column when status changed (best-effort).
 	if req.Status != "" && req.Status != oldStatus {
 		s.syncCardStatus(r.Context(), task, req.Status)
+	}
+
+	// Sync title/description/deadline/assignee changes to YouGile (best-effort).
+	fieldChanged := req.Title != nil || req.Description != nil || req.Deadline != nil || req.AssigneeUserID != nil
+	if fieldChanged {
+		s.syncCardFields(r.Context(), task, req)
 	}
 
 	writeJSON(w, http.StatusOK, toTaskResponse(task))
@@ -274,6 +281,46 @@ func (s *Server) syncCardStatus(ctx context.Context, task domain.Task, status st
 		if err := s.yg.CompleteTask(ctx, token, *task.YougileTaskID); err != nil {
 			s.log.Warn("syncCardStatus: complete", "task_id", task.ID, "err", err)
 		}
+	}
+}
+
+// syncCardFields pushes title/description/deadline/assignee changes to the
+// corresponding YouGile card. Best-effort: errors are only logged.
+func (s *Server) syncCardFields(ctx context.Context, task domain.Task, req updateTaskRequest) {
+	if s.yg == nil || s.cipher == nil {
+		return
+	}
+	if task.YougileTaskID == nil || *task.YougileTaskID == "" {
+		return
+	}
+	token, ok := s.loadToken(ctx, task.TenantID)
+	if !ok {
+		return
+	}
+
+	var assigned []string
+	if req.AssigneeUserID != nil {
+		if *req.AssigneeUserID == "" {
+			assigned = []string{} // clear assignee
+		} else {
+			if u, err := s.repo.GetUser(ctx, *req.AssigneeUserID); err == nil && u.YougileUserID != "" {
+				assigned = []string{u.YougileUserID}
+			}
+		}
+	}
+
+	var dl *yougile.Deadline
+	clearDeadline := false
+	if req.Deadline != nil {
+		if *req.Deadline == "" {
+			clearDeadline = true
+		} else if task.Deadline != nil {
+			dl = yougile.DeadlineFromTime(*task.Deadline, false)
+		}
+	}
+
+	if err := s.yg.UpdateTaskFields(ctx, token, *task.YougileTaskID, req.Title, req.Description, assigned, dl, clearDeadline); err != nil {
+		s.log.Warn("syncCardFields", "task_id", task.ID, "err", err)
 	}
 }
 
