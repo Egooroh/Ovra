@@ -186,6 +186,7 @@ func main() {
 		// tasks due within 24 h (or overdue) that haven't been reminded yet.
 		reminder := service.NewReminderScheduler(repo, cfg.BotInternalURL, cfg.WorkerSecret, log)
 		go func() {
+			reminder.Tick(context.Background()) // run immediately on start
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
 			for {

@@ -723,6 +723,8 @@ func (s *Server) handleMiniAppUpdateTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	oldStatus := task.Status
+
 	if req.Title != nil {
 		task.Title = *req.Title
 	}
@@ -758,6 +760,23 @@ func (s *Server) handleMiniAppUpdateTask(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	// Sync YouGile card column when status changed (best-effort).
+	if req.Status != nil && *req.Status != oldStatus {
+		s.syncCardStatus(r.Context(), updated, *req.Status)
+	}
+
+	// Sync title/description/deadline/assignee changes to YouGile (best-effort).
+	fieldChanged := req.Title != nil || req.Description != nil || req.Deadline != nil || req.AssigneeID != nil
+	if fieldChanged {
+		s.syncCardFields(r.Context(), updated, updateTaskRequest{
+			Title:          req.Title,
+			Description:    req.Description,
+			AssigneeUserID: req.AssigneeID,
+			Deadline:       req.Deadline,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, updated)
 }
 

@@ -1967,27 +1967,54 @@ function formatDigest(data: DigestData): string | null {
     return lines.join('\n');
 }
 
-// Шлёт напоминание о задаче в личку исполнителю — планировщик (POST /internal/reminder).
+// Шлёт батч напоминаний о задачах в личку исполнителю — планировщик (POST /internal/reminder).
 export async function handleReminderDue(
-    payload: { tg_id: string; title: string; deadline: string; overdue: boolean; timezone?: string }
+    payload: { tg_id: string; timezone?: string; tasks: { title: string; deadline: string; overdue: boolean }[] }
 ): Promise<void> {
     const userId = Number(payload.tg_id);
     if (!userId) throw new Error(`invalid tg_id: ${payload.tg_id}`);
 
     const tz = payload.timezone || 'Europe/Moscow';
-    const when = payload.deadline
-        ? new Date(payload.deadline).toLocaleString('ru-RU', {
-            timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-        })
-        : '—';
+    const tasks = payload.tasks ?? [];
 
-    const text = payload.overdue
-        ? `🔴 *Просрочена задача*\n━━━━━━━━━━━━━━━━━━\n📌 ${payload.title}\n⏳ Дедлайн был: ${when}`
-        : `⏰ *Напоминание о задаче*\n━━━━━━━━━━━━━━━━━━\n📌 ${payload.title}\n📅 Дедлайн: ${when}`;
+    const formatDate = (deadline: string) =>
+        deadline
+            ? new Date(deadline).toLocaleString('ru-RU', {
+                timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+            })
+            : '—';
+
+    const overdue = tasks.filter(t => t.overdue);
+    const upcoming = tasks.filter(t => !t.overdue);
+
+    const lines: string[] = [];
+
+    if (overdue.length > 0) {
+        lines.push(overdue.length === 1
+            ? `🔴 *Просрочена задача*`
+            : `🔴 *Просроченные задачи (${overdue.length})*`);
+        lines.push('━━━━━━━━━━━━━━━━━━');
+        for (const t of overdue) {
+            lines.push(`📌 ${t.title}\n⏳ Дедлайн был: ${formatDate(t.deadline)}`);
+        }
+    }
+
+    if (upcoming.length > 0) {
+        if (lines.length > 0) lines.push('');
+        lines.push(upcoming.length === 1
+            ? `⏰ *Напоминание о задаче*`
+            : `⏰ *Напоминания о задачах (${upcoming.length})*`);
+        lines.push('━━━━━━━━━━━━━━━━━━');
+        for (const t of upcoming) {
+            lines.push(`📌 ${t.title}\n📅 Дедлайн: ${formatDate(t.deadline)}`);
+        }
+    }
+
+    if (lines.length === 0) return;
 
     // Может упасть с 403 (бот заблокирован) / 400 (чат не найден), если юзер не
     // запускал бота в личке — это перманентно, эндпоинт обработает отдельно.
-    await bot.telegram.sendMessage(userId, text, { parse_mode: 'Markdown' });
+    await bot.telegram.sendMessage(userId, lines.join('\n'), { parse_mode: 'Markdown' });
 }
 
 // Собирает и шлёт дайджест в чат — используется планировщиком (POST /internal/digest).

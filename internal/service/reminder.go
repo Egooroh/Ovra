@@ -36,35 +36,61 @@ func NewReminderScheduler(store ReminderStore, botURL, workerSecret string, log 
 	return &ReminderScheduler{store: store, botURL: botURL, workerSecret: workerSecret, log: log}
 }
 
-// Tick runs one pass: find due reminders, notify the bot, mark each reminded.
+// Tick runs one pass: find due reminders, group by assignee, notify the bot
+// once per user (batched), then mark all reminded.
 func (rs *ReminderScheduler) Tick(ctx context.Context) {
 	due, err := rs.store.ListDueReminders(ctx, ReminderWindow)
 	if err != nil {
 		rs.log.Error("reminder: list due", "err", err)
 		return
 	}
+	if len(due) == 0 {
+		return
+	}
+
 	now := time.Now()
+
+	type taskItem struct {
+		d       domain.ReminderDue
+		overdue bool
+	}
+	// Group tasks by assignee Telegram ID.
+	byUser := map[string][]taskItem{}
 	for _, d := range due {
-		if rs.notifyBot(d, d.Deadline.Before(now)) {
-			if err := rs.store.MarkTaskReminded(ctx, d.TaskID); err != nil {
-				rs.log.Warn("reminder: mark reminded", "task", d.TaskID, "err", err)
+		byUser[d.AssigneeTgID] = append(byUser[d.AssigneeTgID], taskItem{d, d.Deadline.Before(now)})
+	}
+
+	for _, items := range byUser {
+		tasks := make([]map[string]any, len(items))
+		for i, item := range items {
+			tasks[i] = map[string]any{
+				"title":    item.d.Title,
+				"deadline": item.d.Deadline.Format(time.RFC3339),
+				"overdue":  item.overdue,
+			}
+		}
+		first := items[0].d
+		if !rs.notifyBot(first.AssigneeTgID, first.AssigneeTimezone, tasks) {
+			continue
+		}
+		for _, item := range items {
+			if err := rs.store.MarkTaskReminded(ctx, item.d.TaskID); err != nil {
+				rs.log.Warn("reminder: mark reminded", "task", item.d.TaskID, "err", err)
 			}
 		}
 	}
 }
 
-// notifyBot POSTs the reminder to the bot's /internal/reminder endpoint.
-// Returns true on a 200 so the caller can stamp reminded_at.
-func (rs *ReminderScheduler) notifyBot(d domain.ReminderDue, overdue bool) bool {
+// notifyBot POSTs a batch of reminders for one user to the bot's /internal/reminder endpoint.
+// Returns true on a 200 so the caller can stamp reminded_at for all tasks in the batch.
+func (rs *ReminderScheduler) notifyBot(tgID, timezone string, tasks []map[string]any) bool {
 	body, err := json.Marshal(map[string]any{
-		"tg_id":    d.AssigneeTgID,
-		"title":    d.Title,
-		"deadline": d.Deadline.Format(time.RFC3339),
-		"overdue":  overdue,
-		"timezone": d.AssigneeTimezone,
+		"tg_id":    tgID,
+		"timezone": timezone,
+		"tasks":    tasks,
 	})
 	if err != nil {
-		rs.log.Error("reminder: marshal", "task", d.TaskID, "err", err)
+		rs.log.Error("reminder: marshal", "tg", tgID, "err", err)
 		return false
 	}
 
@@ -73,7 +99,7 @@ func (rs *ReminderScheduler) notifyBot(d domain.ReminderDue, overdue bool) bool 
 		rs.botURL+"/internal/reminder", bytes.NewReader(body),
 	)
 	if err != nil {
-		rs.log.Error("reminder: build request", "task", d.TaskID, "err", err)
+		rs.log.Error("reminder: build request", "tg", tgID, "err", err)
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -83,14 +109,14 @@ func (rs *ReminderScheduler) notifyBot(d domain.ReminderDue, overdue bool) bool 
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		rs.log.Error("reminder: POST failed", "task", d.TaskID, "err", err)
+		rs.log.Error("reminder: POST failed", "tg", tgID, "err", err)
 		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		rs.log.Error("reminder: unexpected status", "task", d.TaskID, "status", resp.StatusCode)
+		rs.log.Error("reminder: unexpected status", "tg", tgID, "status", resp.StatusCode)
 		return false
 	}
-	rs.log.Info("reminder: sent", "task", d.TaskID, "tg", d.AssigneeTgID, "overdue", overdue)
+	rs.log.Info("reminder: sent batch", "tg", tgID, "count", len(tasks))
 	return true
 }

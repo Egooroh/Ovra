@@ -133,9 +133,9 @@ const server = http.createServer(async (req, res) => {
         for await (const chunk of req) body += chunk;
 
         try {
-            const payload = JSON.parse(body) as { tg_id: string; title: string; deadline: string; overdue: boolean };
+            const payload = JSON.parse(body) as { tg_id: string; timezone?: string; tasks: { title: string; deadline: string; overdue: boolean }[] };
             await handleReminderDue(payload);
-            console.log(`[reminder] sent to tg_id=${payload.tg_id} overdue=${payload.overdue}`);
+            console.log(`[reminder] sent batch to tg_id=${payload.tg_id} count=${payload.tasks?.length}`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
         } catch (e: any) {
