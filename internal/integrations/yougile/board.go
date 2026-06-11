@@ -100,6 +100,11 @@ func (c *Client) ListColumns(ctx context.Context, token, boardID string) ([]Colu
 	if err := c.do(ctx, "GET", path, token, nil, &env); err != nil {
 		return nil, err
 	}
+	// Some boards return column titles double-encoded (UTF-8 read as CP1251).
+	// Repair them at the single read chokepoint so every consumer gets clean names.
+	for i := range env.Content {
+		env.Content[i].Title = fixMojibake(env.Content[i].Title)
+	}
 	return env.Content, nil
 }
 
