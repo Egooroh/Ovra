@@ -647,7 +647,10 @@ async function performColumnMove(
     try {
         const res = await moveTaskToColumn(task.id, columnId);
         const colTitle = res.column_title || columns.find(c => c.id === columnId)?.title || 'колонку';
-        const emoji = res.status ? statusEmoji(res.status) : '🔀';
+        // Эмодзи под цвет колонки YouGile; если цвет неизвестен — откат на
+        // канонический статус-эмодзи, затем на нейтральный 🔀.
+        const colColor = res.column_color || columns.find(c => c.id === columnId)?.color || 0;
+        const emoji = colorEmoji(colColor) || (res.status ? statusEmoji(res.status) : '') || '🔀';
         await ctx.reply(`${emoji} «${task.title}» → *${colTitle}*`, { parse_mode: 'Markdown' });
     } catch (e) {
         console.error('[move] moveTaskToColumn:', e);
@@ -2543,6 +2546,33 @@ function statusEmoji(status: string): string {
         case 'done':        return '✅';
         default:            return '•';
     }
+}
+
+// colorEmoji — эмодзи-кружок под цвет колонки YouGile. Палитра подтверждена по
+// DOM пикера «Цвет колонки» (индексы 1–16, в комментариях реальные RGB). Эмодзи
+// грубее палитры (бирюза/циан → 🟢/🔵, серые → ⚪/⚫), берём ближайший по цвету.
+// 0 / неизвестный индекс → '' (вызывающий откатывается на статус-эмодзи).
+const YOUGILE_COLOR_EMOJI: Record<number, string> = {
+    1:  '⚪', // rgb(150,160,182) серо-синий
+    2:  '🔴', // rgb(218,119,119) красный
+    3:  '🟤', // rgb(194,148,94)  коричневый
+    4:  '🟡', // rgb(252,226,88)  жёлтый
+    5:  '🟢', // rgb(106,151,80)  зелёный
+    6:  '🟢', // rgb(84,160,155)  бирюзовый
+    7:  '🔵', // rgb(107,134,204) синий
+    8:  '🟣', // rgb(173,113,221) фиолетовый
+    9:  '⚫', // rgb(102,112,133) тёмно-серый
+    10: '🔴', // rgb(219,60,60)   красный
+    11: '🟠', // rgb(216,103,39)  оранжевый
+    12: '🟡', // rgb(212,177,2)   золотой
+    13: '🟢', // rgb(88,181,34)   ярко-зелёный
+    14: '🔵', // rgb(8,167,169)   циан
+    15: '🔵', // rgb(70,125,225)  синий
+    16: '🟣', // rgb(191,72,205)  маджента
+};
+
+function colorEmoji(color: number): string {
+    return YOUGILE_COLOR_EMOJI[color] ?? '';
 }
 
 // Человекочитаемое русское название статуса.

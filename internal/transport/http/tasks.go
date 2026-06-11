@@ -413,6 +413,7 @@ type columnView struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
 	Status string `json:"status"` // best-effort canonical status, "" if unmapped
+	Color  int    `json:"color"`  // YouGile palette index 1–16 (0 = unset)
 }
 
 // handleListColumns returns the workspace board's live columns (id, title and
@@ -449,7 +450,7 @@ func (s *Server) handleListColumns(w http.ResponseWriter, r *http.Request) {
 	statusByCol := canonicalStatusMap(ws, cols)
 	out := make([]columnView, len(cols))
 	for i, c := range cols {
-		out[i] = columnView{ID: c.ID, Title: c.Title, Status: statusByCol[c.ID]}
+		out[i] = columnView{ID: c.ID, Title: c.Title, Status: statusByCol[c.ID], Color: c.Color}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"columns": out})
 }
@@ -513,13 +514,17 @@ func (s *Server) handleMoveTaskColumn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title := ""
+	color := 0
+	found := false
 	for _, c := range cols {
 		if c.ID == req.ColumnID {
 			title = c.Title
+			color = c.Color
+			found = true
 			break
 		}
 	}
-	if title == "" {
+	if !found {
 		writeError(w, http.StatusNotFound, "column not found on the board")
 		return
 	}
@@ -549,6 +554,7 @@ func (s *Server) handleMoveTaskColumn(w http.ResponseWriter, r *http.Request) {
 		"task":         toTaskResponse(task),
 		"column_id":    req.ColumnID,
 		"column_title": title,
+		"column_color": color,
 		"status":       canonical,
 	})
 }

@@ -260,10 +260,12 @@ export async function listTasks(tenantId: string): Promise<BoardTask[]> {
 
 // Колонка доски YouGile (реальная, включая кастомные). status — лучшее
 // каноническое приближение ("" если колонка не маппится ни в один из 4 статусов).
+// color — индекс палитры YouGile 1–16 (0 = не задан) для подбора эмодзи по цвету.
 export interface BoardColumn {
     id: string;
     title: string;
     status: string;
+    color: number;
 }
 
 // Живой список колонок доски воркспейса (для матчинга названия из текста/голоса).
@@ -275,8 +277,9 @@ export async function listBoardColumns(tenantId: string): Promise<BoardColumn[]>
 }
 
 // Переместить карточку задачи в произвольную колонку доски (по её id).
-// Возвращает реальное название колонки и каноническое приближение статуса.
-export async function moveTaskToColumn(taskId: string, columnId: string): Promise<{ column_title: string; status: string }> {
+// Возвращает реальное название колонки, цвет (индекс палитры YouGile) и
+// каноническое приближение статуса.
+export async function moveTaskToColumn(taskId: string, columnId: string): Promise<{ column_title: string; column_color: number; status: string }> {
     const res = await fetch(`${BACKEND_URL}/v1/tasks/${taskId}/move-column`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader() },
@@ -287,7 +290,7 @@ export async function moveTaskToColumn(taskId: string, columnId: string): Promis
         throw new Error(data.error || `moveTaskToColumn HTTP ${res.status}`);
     }
     const data: any = await res.json();
-    return { column_title: data.column_title ?? '', status: data.status ?? '' };
+    return { column_title: data.column_title ?? '', column_color: data.column_color ?? 0, status: data.status ?? '' };
 }
 
 export async function syncWorkspace(tenantId: string): Promise<SyncResult> {

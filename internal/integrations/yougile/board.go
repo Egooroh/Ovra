@@ -21,10 +21,12 @@ type Board struct {
 	Title string `json:"title"`
 }
 
-// Column is a board column (a task status lane).
+// Column is a board column (a task status lane). Color is YouGile's palette
+// index (1–16); 0 when unset.
 type Column struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	Color int    `json:"color"`
 }
 
 // idResponse is the common {"id": "..."} create response.
