@@ -139,11 +139,6 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateTask changes task fields and optionally moves its YouGile card.
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
-	if s.repo == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
-		return
-	}
-
 	id := r.PathValue("id")
 	var req updateTaskRequest
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -151,8 +146,16 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	noFieldChange := req.Title == nil && req.Description == nil && req.AssigneeUserID == nil && req.Deadline == nil
+
+	if req.Status == "" && noFieldChange {
+		writeError(w, http.StatusBadRequest, "at least one field must be specified")
+		return
+	}
+
 	// Fast path: status-only update delegates to the task service (YouGile sync).
-	if req.Status != "" && req.Title == nil && req.Description == nil && req.AssigneeUserID == nil && req.Deadline == nil {
+	// The repo is not needed here — UpdateStatus owns both DB and YouGile card.
+	if req.Status != "" && noFieldChange {
 		if s.tasks == nil {
 			writeError(w, http.StatusServiceUnavailable, "task updates disabled: APP_SECRET not set")
 			return
@@ -166,7 +169,11 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Full field update.
+	// Full field update — needs repo.
+	if s.repo == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+		return
+	}
 	task, err := s.repo.GetTask(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
