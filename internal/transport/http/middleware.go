@@ -29,13 +29,17 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
-// requireBotSecret is middleware that enforces the BOT_SECRET token on all
+// requireBotSecret is middleware that enforces a shared-secret token on all
 // mutating /v1/* requests (POST/PATCH/DELETE). GET and /miniapp/* are exempt.
-// When BOT_SECRET is empty the check is skipped (dev mode).
+//
+// Two callers authenticate with two different secrets, by design:
+//   - the meeting-worker POSTs /v1/meetings/summary with WORKER_SECRET;
+//   - the Telegram bot uses BOT_SECRET for every other /v1/* mutation.
+//
+// When the relevant secret is empty the check is skipped (dev mode).
 func (s *Server) requireBotSecret(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secret := s.cfg.BotSecret
-		if secret == "" || !strings.HasPrefix(r.URL.Path, "/v1/") {
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -43,9 +47,20 @@ func (s *Server) requireBotSecret(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		// The meeting-worker authenticates to /v1/meetings/summary with
+		// WORKER_SECRET; everything else is the bot with BOT_SECRET.
+		expected, name := s.cfg.BotSecret, "bot secret"
+		if r.URL.Path == "/v1/meetings/summary" {
+			expected, name = s.cfg.WorkerSecret, "worker secret"
+		}
+		if expected == "" {
+			next.ServeHTTP(w, r) // dev mode: no secret configured
+			return
+		}
 		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if auth != secret {
-			writeError(w, http.StatusUnauthorized, "invalid or missing bot secret")
+		if auth != expected {
+			writeError(w, http.StatusUnauthorized, "invalid or missing "+name)
 			return
 		}
 		next.ServeHTTP(w, r)
