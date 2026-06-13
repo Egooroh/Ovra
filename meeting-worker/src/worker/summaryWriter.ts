@@ -176,9 +176,19 @@ function splitIntoChunks(text: string, maxChars: number): string[] {
 
 // ── промпты ───────────────────────────────────────────────────────────────────
 
+// Текущая дата в таймзоне команды — без неё модель не может превратить
+// относительные сроки («до конца недели», «к пятнице») в конкретную ISO-дату.
+function todayHint(): string {
+  const tz = process.env.DEADLINE_TZ || "Europe/Moscow";
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date());
+  return `Сегодня ${today}. Относительные сроки («до конца недели», «к пятнице», «завтра») переводи в дату YYYY-MM-DD (или YYYY-MM-DDTHH:mm, если названо время).`;
+}
+
 function buildMainPrompt(transcript: string, title: string): string {
   return `Ты — ассистент по управлению проектами.
 Ниже транскрипция встречи "${title}".
+
+${todayHint()}
 
 Верни ТОЛЬКО JSON-объект (без markdown-блоков, без объяснений):
 {
@@ -198,6 +208,8 @@ function buildChunkPrompt(chunk: string, n: number, total: number, title: string
   return `Ты — ассистент по управлению проектами.
 Это часть ${n} из ${total} транскрипции встречи "${title}".
 
+${todayHint()}
+
 Извлеки из этой части ключевые моменты и задачи.
 Верни ТОЛЬКО JSON-объект (без markdown-блоков, без объяснений):
 {
@@ -216,6 +228,8 @@ ${chunk}`;
 function buildReducePrompt(summaries: string, tasks: MeetingTask[], title: string): string {
   return `Ты — ассистент по управлению проектами.
 Встреча "${title}" была разбита на части и суммаризирована. Ниже — саммари каждой части и список всех задач.
+
+${todayHint()}
 
 Саммари частей:
 ${summaries}

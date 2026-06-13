@@ -316,7 +316,10 @@ func (s *Server) syncCardFields(ctx context.Context, task domain.Task, req updat
 		if *req.Deadline == "" {
 			clearDeadline = true
 		} else if task.Deadline != nil {
-			dl = yougile.DeadlineFromTime(*task.Deadline, false)
+			// Сохраняем компонент времени: иначе синк «расплющивал» timed-дедлайн
+			// в date-only, и YouGile красил его по календарному дню (жёлтым «сегодня»),
+			// расходясь с просрочкой по времени в боте/напоминаниях.
+			dl = yougile.DeadlineFromTime(*task.Deadline, !isDateOnly(*task.Deadline))
 		}
 	}
 
@@ -692,6 +695,14 @@ func parseDeadline(s string, loc *time.Location) (t time.Time, hasTime bool, err
 		return t, false, nil // date only — no time component
 	}
 	return time.Time{}, false, fmt.Errorf("unrecognized deadline %q", s)
+}
+
+// isDateOnly reports whether t carries no clock component (midnight UTC), which
+// is exactly how parseDeadline stores a date-only deadline. Used on the sync
+// path to restore the withTime flag without persisting it separately.
+func isDateOnly(t time.Time) bool {
+	u := t.UTC()
+	return u.Hour() == 0 && u.Minute() == 0 && u.Second() == 0
 }
 
 // toTaskResponses maps a slice of tasks to their JSON view.

@@ -622,7 +622,7 @@ async function processTaskAndConfirm(
 
         // Автономный режим: создаём задачу сразу, без карточки-подтверждения.
         if (confirmMode === 'auto') {
-            await autoCreateTask(ctx, task, ws.tenant_id, chatId, targetChatId);
+            await autoCreateTask(ctx, task, ws.tenant_id, chatId, targetChatId, force);
             continue;
         }
 
@@ -656,6 +656,7 @@ async function autoCreateTask(
     tenantId: string,
     originChatId: number,
     targetChatId: number | string,
+    force = false,
 ): Promise<void> {
     // @username → имя из YouGile, если привязан через /bind.
     let assignee = (task.assignee || '').trim();
@@ -669,15 +670,27 @@ async function autoCreateTask(
 
     let result;
     try {
-        result = await sendTaskToOvraBackend(tenantId, title, assignee, description, deadline, false);
+        // force=true (реакция 🔥/✍️) обходит дедуп на бэкенде — создаём несмотря на похожие.
+        result = await sendTaskToOvraBackend(tenantId, title, assignee, description, deadline, force);
     } catch (e) {
         console.error('[auto] create task error:', e);
         return;
     }
 
-    // Найдены похожие задачи — в авто-режиме пропускаем, чтобы не задвоить.
+    // Похожая задача уже есть. С force сюда не попадаем (бэкенд не проверяет дубли),
+    // поэтому не молчим: сообщаем и подсказываем, как создать принудительно.
     if (result.isDuplicate) {
         console.log(`[auto] skipped duplicate: "${title}"`);
+        try {
+            await ctx.telegram.sendMessage(
+                targetChatId,
+                `⏭️ Похоже, такая задача уже есть — пропустил:\n📌 ${title}\n\n` +
+                `Поставьте 🔥 на сообщение, чтобы создать всё равно.`,
+                { parse_mode: 'Markdown' },
+            );
+        } catch (e) {
+            console.error('[auto] dup notice error:', e);
+        }
         return;
     }
 
@@ -2258,7 +2271,7 @@ async function formatDigest(data: DigestData): Promise<string | null> {
 
 // Шлёт батч напоминаний о задачах в личку исполнителю — планировщик (POST /internal/reminder).
 export async function handleReminderDue(
-    payload: { tg_id: string; timezone?: string; tasks: { title: string; deadline: string; overdue: boolean }[] }
+    payload: { tg_id: string; timezone?: string; tasks: { title: string; deadline: string; overdue: boolean; has_time?: boolean }[] }
 ): Promise<void> {
     const userId = Number(payload.tg_id);
     if (!userId) throw new Error(`invalid tg_id: ${payload.tg_id}`);
@@ -2266,12 +2279,18 @@ export async function handleReminderDue(
     const tz = payload.timezone || 'Europe/Moscow';
     const tasks = payload.tasks ?? [];
 
-    const formatDate = (deadline: string) =>
-        deadline
-            ? new Date(deadline).toLocaleString('ru-RU', {
-                timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-            })
-            : '—';
+    // Дедлайн без времени (date-only) показываем как дату в UTC, без часов — иначе
+    // полночь UTC отрисуется как «06:00» в TZ команды и собьёт с толку.
+    const formatDate = (deadline: string, hasTime: boolean) => {
+        if (!deadline) return '—';
+        const d = new Date(deadline);
+        if (!hasTime) {
+            return d.toLocaleDateString('ru-RU', { timeZone: 'UTC', day: '2-digit', month: '2-digit' });
+        }
+        return d.toLocaleString('ru-RU', {
+            timeZone: tz, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+    };
 
     const overdue = tasks.filter(t => t.overdue);
     const upcoming = tasks.filter(t => !t.overdue);
@@ -2284,7 +2303,7 @@ export async function handleReminderDue(
             : `🔴 *Просроченные задачи (${overdue.length})*`);
         lines.push('━━━━━━━━━━━━━━━━━━');
         for (const t of overdue) {
-            lines.push(`📌 ${t.title}\n⏳ Дедлайн был: ${formatDate(t.deadline)}`);
+            lines.push(`📌 ${t.title}\n⏳ Дедлайн был: ${formatDate(t.deadline, t.has_time !== false)}`);
         }
     }
 
@@ -2295,7 +2314,7 @@ export async function handleReminderDue(
             : `⏰ *Напоминания о задачах (${upcoming.length})*`);
         lines.push('━━━━━━━━━━━━━━━━━━');
         for (const t of upcoming) {
-            lines.push(`📌 ${t.title}\n📅 Дедлайн: ${formatDate(t.deadline)}`);
+            lines.push(`📌 ${t.title}\n📅 Дедлайн: ${formatDate(t.deadline, t.has_time !== false)}`);
         }
     }
 

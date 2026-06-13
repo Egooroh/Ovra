@@ -80,7 +80,7 @@ func (s *Server) handleGetDigest(w http.ResponseWriter, r *http.Request) {
 	var unassigned []digestTaskItem
 
 	for _, t := range tasks {
-		item := toDigestItem(t, now)
+		item := toDigestItem(t, now, ws.Timezone)
 		if t.AssigneeUserID == nil {
 			unassigned = append(unassigned, item)
 			continue
@@ -158,7 +158,7 @@ func (s *Server) handleUpdateDigestSettings(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-func toDigestItem(t domain.Task, now time.Time) digestTaskItem {
+func toDigestItem(t domain.Task, now time.Time, tz string) digestTaskItem {
 	item := digestTaskItem{
 		ID:     t.ID,
 		Title:  t.Title,
@@ -167,7 +167,17 @@ func toDigestItem(t domain.Task, now time.Time) digestTaskItem {
 	if t.Deadline != nil {
 		dl := t.Deadline.Format(time.RFC3339)
 		item.Deadline = &dl
-		item.Overdue = t.Deadline.Before(now)
+		// date-only дедлайн («до конца дня», без времени) просрочен только после
+		// конца календарного дня в TZ воркспейса; timed — по точному моменту.
+		// Иначе он считался бы просроченным с самого утра (хранится как полночь UTC).
+		if isDateOnly(*t.Deadline) {
+			loc := workspaceLocation(tz)
+			y, m, d := t.Deadline.UTC().Date()
+			endOfDay := time.Date(y, m, d, 23, 59, 59, 0, loc)
+			item.Overdue = now.After(endOfDay)
+		} else {
+			item.Overdue = t.Deadline.Before(now)
+		}
 	}
 	return item
 }

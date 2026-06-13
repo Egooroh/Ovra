@@ -53,11 +53,20 @@ func (rs *ReminderScheduler) Tick(ctx context.Context) {
 	type taskItem struct {
 		d       domain.ReminderDue
 		overdue bool
+		hasTime bool
 	}
 	// Group tasks by assignee Telegram ID.
 	byUser := map[string][]taskItem{}
 	for _, d := range due {
-		byUser[d.AssigneeTgID] = append(byUser[d.AssigneeTgID], taskItem{d, d.Deadline.Before(now)})
+		hasTime := !isDateOnlyDeadline(d.Deadline)
+		// Дедлайн со временем просрочен по точному моменту; date-only («до конца
+		// дня», без времени) — только после конца календарного дня в TZ исполнителя,
+		// иначе он считался бы просроченным с самого утра.
+		overdue := d.Deadline.Before(now)
+		if !hasTime {
+			overdue = now.After(endOfDayInTZ(d.Deadline, d.AssigneeTimezone))
+		}
+		byUser[d.AssigneeTgID] = append(byUser[d.AssigneeTgID], taskItem{d, overdue, hasTime})
 	}
 
 	for _, items := range byUser {
@@ -67,6 +76,7 @@ func (rs *ReminderScheduler) Tick(ctx context.Context) {
 				"title":    item.d.Title,
 				"deadline": item.d.Deadline.Format(time.RFC3339),
 				"overdue":  item.overdue,
+				"has_time": item.hasTime,
 			}
 		}
 		first := items[0].d
@@ -119,4 +129,19 @@ func (rs *ReminderScheduler) notifyBot(tgID, timezone string, tasks []map[string
 	}
 	rs.log.Info("reminder: sent batch", "tg", tgID, "count", len(tasks))
 	return true
+}
+
+// isDateOnlyDeadline reports whether the deadline has no clock component (stored
+// as midnight UTC by parseDeadline) — i.e. it means "by end of that day".
+func isDateOnlyDeadline(t time.Time) bool {
+	u := t.UTC()
+	return u.Hour() == 0 && u.Minute() == 0 && u.Second() == 0
+}
+
+// endOfDayInTZ returns 23:59:59 of the deadline's calendar date in tz. A
+// date-only deadline is overdue only once this instant passes.
+func endOfDayInTZ(deadline time.Time, tz string) time.Time {
+	loc := digestLocation(tz)
+	y, m, d := deadline.UTC().Date()
+	return time.Date(y, m, d, 23, 59, 59, 0, loc)
 }
