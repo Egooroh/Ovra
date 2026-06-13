@@ -12,7 +12,7 @@ COPY tsconfig.json ./
 COPY prisma ./prisma
 COPY proto ./proto
 COPY src ./src
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=1536 npm run build
 RUN npx prisma generate
 
 FROM node:20-slim

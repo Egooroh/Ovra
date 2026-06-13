@@ -42,20 +42,10 @@ services:
       # (публичный HTTPS) для кнопок в боте. Требует HTTPS в продакшене.
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       MINI_APP_URL: "${MINI_APP_URL:-}"
-      # Исходящий HTTPS через корпоративный прокси на хосте (порт 10801).
-      # Go http.DefaultTransport читает HTTPS_PROXY автоматически — нужно для
-      # обращений к yougile.com, openrouter.ai и другим внешним API.
-      # host.docker.internal резолвится в IP хоста (extra_hosts ниже).
-      # NO_PROXY исключает внутренние Docker-сервисы от проксирования.
-      HTTPS_PROXY: "http://host.docker.internal:10801"
-      HTTP_PROXY:  "http://host.docker.internal:10801"
-      NO_PROXY: "localhost,127.0.0.1,postgres,bot,meeting-worker,app"
     ports:
       - "8080:8080"
     volumes:
       - ./workspace.yaml:/app/workspace.yaml:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   meeting-worker:
     build: ./meeting-worker
@@ -103,13 +93,6 @@ services:
     command: tunnel --no-autoupdate --url http://app:8080
     depends_on:
       - app
-    environment:
-      # Исходящий трафик к Cloudflare edge через корпоративный прокси.
-      HTTPS_PROXY: "http://host.docker.internal:10801"
-      HTTP_PROXY:  "http://host.docker.internal:10801"
-      NO_PROXY: "localhost,127.0.0.1,app"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   bot:
@@ -129,10 +112,6 @@ services:
       BOT_SECRET: "${BOT_SECRET:-}"
     volumes:
       - bot_data:/app/data
-    # PROXY_URL в .env бота должен указывать на host.docker.internal (а не 127.0.0.1),
-    # чтобы из контейнера дотянуться до прокси на хост-машине.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:
