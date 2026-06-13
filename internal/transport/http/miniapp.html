@@ -1303,9 +1303,9 @@ async function onTaskDetectionToggle() {
   const mode = isAi ? 'ai' : 'heuristic';
   renderTaskDetectionBadge(isAi);
   try {
-    await fetch(apiBase() + `/v1/workspaces/${tenantId}/task-detection`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode }),
+    await fetch(apiBase() + '/miniapp/task-detection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, mode }),
     });
   } catch (e) { tg.showAlert('Не удалось сохранить настройки детекции'); }
 }
@@ -1356,9 +1356,9 @@ async function onConfirmModeChange() {
   const approveEveryone = el('approveEveryoneToggle').checked;
   const mode = auto ? 'auto' : (approveEveryone ? 'everyone' : 'admin_only');
   try {
-    await fetch(apiBase() + `/v1/workspaces/${tenantId}/confirm-mode`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode }),
+    await fetch(apiBase() + '/miniapp/confirm-mode', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, mode }),
     });
   } catch (e) { tg.showAlert('Не удалось сохранить режим подтверждения'); }
 }
@@ -1368,9 +1368,9 @@ async function onDigestToggle() {
   const time    = el('digestTimeInput').value || '09:00';
   if (enabled) { show('dashDigestTimeRow'); } else { hide('dashDigestTimeRow'); }
   try {
-    await fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, time }),
+    await fetch(apiBase() + '/miniapp/digest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, enabled, time }),
     });
   } catch (e) { tg.showAlert('Не удалось сохранить настройки дайджеста'); }
 }
@@ -1381,9 +1381,9 @@ async function onDigestTimeChange() {
   const time    = el('digestTimeInput').value;
   if (!time) return;
   try {
-    await fetch(apiBase() + `/v1/workspaces/${tenantId}/digest`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, time }),
+    await fetch(apiBase() + '/miniapp/digest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, enabled, time }),
     });
   } catch (e) { tg.showAlert('Не удалось сохранить время'); }
 }

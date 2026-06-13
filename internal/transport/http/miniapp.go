@@ -781,6 +781,236 @@ func (s *Server) handleMiniAppUpdateTask(w http.ResponseWriter, r *http.Request)
 }
 
 // ---------------------------------------------------------------------------
+// POST /miniapp/confirm-mode
+// ---------------------------------------------------------------------------
+
+type miniappConfirmModeRequest struct {
+	InitData string `json:"init_data"`
+	TenantID string `json:"tenant_id"`
+	Mode     string `json:"mode"`
+}
+
+func (s *Server) handleMiniAppSetConfirmMode(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappConfirmModeRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "init_data and tenant_id are required")
+		return
+	}
+	if req.Mode != "admin_only" && req.Mode != "everyone" && req.Mode != "auto" {
+		writeError(w, http.StatusBadRequest, `mode must be "admin_only", "everyone" or "auto"`)
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp confirm-mode)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only workspace admins can change confirm mode")
+		return
+	}
+
+	if err := s.repo.SetConfirmMode(r.Context(), req.TenantID, req.Mode); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set confirm mode (miniapp)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"confirm_mode": req.Mode})
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/task-detection
+// ---------------------------------------------------------------------------
+
+type miniappTaskDetectionRequest struct {
+	InitData string `json:"init_data"`
+	TenantID string `json:"tenant_id"`
+	Mode     string `json:"mode"`
+}
+
+func (s *Server) handleMiniAppSetTaskDetection(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappTaskDetectionRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "init_data and tenant_id are required")
+		return
+	}
+	if req.Mode != "ai" && req.Mode != "heuristic" {
+		writeError(w, http.StatusBadRequest, `mode must be "ai" or "heuristic"`)
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp task-detection)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only workspace admins can change task detection")
+		return
+	}
+
+	if err := s.repo.SetTaskDetection(r.Context(), req.TenantID, req.Mode); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set task detection (miniapp)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"task_detection": req.Mode})
+}
+
+// ---------------------------------------------------------------------------
+// POST /miniapp/digest
+// ---------------------------------------------------------------------------
+
+type miniappUpdateDigestRequest struct {
+	InitData string `json:"init_data"`
+	TenantID string `json:"tenant_id"`
+	Enabled  bool   `json:"enabled"`
+	Time     string `json:"time"`
+}
+
+func (s *Server) handleMiniAppUpdateDigest(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+
+	var req miniappUpdateDigestRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "init_data and tenant_id are required")
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp digest)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only workspace admins can change digest settings")
+		return
+	}
+
+	digestTime := req.Time
+	if digestTime == "" {
+		digestTime = "09:00"
+	}
+
+	if err := s.repo.SetDigestSettings(r.Context(), req.TenantID, req.Enabled, digestTime); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set digest settings (miniapp)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": req.Enabled, "time": digestTime})
+}
+
+// ---------------------------------------------------------------------------
 // POST /miniapp/set-timezone
 // ---------------------------------------------------------------------------
 

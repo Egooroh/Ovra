@@ -101,6 +101,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /miniapp/bind-user", s.handleMiniAppBindUser)
 	mux.HandleFunc("POST /miniapp/update-task", s.handleMiniAppUpdateTask)
 	mux.HandleFunc("POST /miniapp/set-timezone", s.handleMiniAppSetTimezone)
+	mux.HandleFunc("POST /miniapp/confirm-mode", s.handleMiniAppSetConfirmMode)
+	mux.HandleFunc("POST /miniapp/task-detection", s.handleMiniAppSetTaskDetection)
+	mux.HandleFunc("POST /miniapp/digest", s.handleMiniAppUpdateDigest)
 	// Outermost first: recover panics → log → enforce bot secret on /v1/* writes.
 	return s.recoverPanic(s.requestLogger(s.requireBotSecret(mux)))
 }
