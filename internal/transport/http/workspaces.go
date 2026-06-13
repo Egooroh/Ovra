@@ -29,7 +29,7 @@ type workspaceResponse struct {
 	BoardResolved    bool   `json:"board_resolved"` // all four columns mapped
 	DigestEnabled    bool   `json:"digest_enabled"`
 	DigestTime       string `json:"digest_time"`
-	ConfirmMode      string `json:"confirm_mode"`   // "admin_only" | "everyone"
+	ConfirmMode      string `json:"confirm_mode"`   // "admin_only" | "everyone" | "auto"
 	TaskDetection    string `json:"task_detection"` // "ai" | "heuristic"
 	PmChatID         string `json:"pm_chat_id"`   // private chat that receives confirmation cards
 }
@@ -206,11 +206,16 @@ func (s *Server) workspaceResp(ctx context.Context, ws domain.Workspace) workspa
 	}
 }
 
+// confirmMode normalizes the stored value. Explicit choices pass through;
+// an empty/unknown value falls back to the product default 'everyone'
+// (manual approval, anyone can approve).
 func confirmMode(m string) string {
-	if m == "everyone" {
+	switch m {
+	case "everyone", "auto", "admin_only":
+		return m
+	default:
 		return "everyone"
 	}
-	return "admin_only"
 }
 
 func taskDetection(m string) string {
@@ -254,8 +259,8 @@ func (s *Server) handleSetConfirmMode(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &req); err != nil {
 		return
 	}
-	if req.Mode != "admin_only" && req.Mode != "everyone" {
-		writeError(w, http.StatusBadRequest, `mode must be "admin_only" or "everyone"`)
+	if req.Mode != "admin_only" && req.Mode != "everyone" && req.Mode != "auto" {
+		writeError(w, http.StatusBadRequest, `mode must be "admin_only", "everyone" or "auto"`)
 		return
 	}
 	if err := s.repo.SetConfirmMode(r.Context(), tenant, req.Mode); err != nil {

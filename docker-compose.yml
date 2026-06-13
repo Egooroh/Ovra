@@ -95,6 +95,8 @@ services:
     volumes:
       # JSON-файлы саммари встреч — общая папка чтобы Go-разработчик мог читать
       - meeting_output:/app/output
+    # Без этого после OOM (Exit 137) контейнер молча оставался лежать.
+    restart: unless-stopped
 
   bot:
     build: ./ovra_bot

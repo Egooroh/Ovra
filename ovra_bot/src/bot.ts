@@ -549,7 +549,15 @@ function resolveSelfAssignee(sender: { first_name: string; last_name?: string; u
     return [sender.first_name, sender.last_name].filter(Boolean).join(' ');
 }
 
-async function processTaskAndConfirm(ctx: Context, text: string, force = false, context: string[] = []) {
+// onNoTask (опц.) вызывается, если ИИ не нашёл задачу в тексте. Текст/реакции его
+// не передают (молчат), а голосовые — передают, чтобы не оставлять пользователя без ответа.
+async function processTaskAndConfirm(
+    ctx: Context,
+    text: string,
+    force = false,
+    context: string[] = [],
+    onNoTask?: () => Promise<void>,
+) {
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
@@ -585,7 +593,10 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false, 
         });
     }
 
-    if (tasks.length === 0) return;
+    if (tasks.length === 0) {
+        if (onNoTask) await onNoTask();
+        return;
+    }
 
     const target = confirmTarget.get(ws.tenant_id) ?? confirmDefault;
     // Per-workspace pm_chat_id takes priority; fall back to env-configured default.
@@ -600,11 +611,19 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false, 
         return;
     }
 
+    const confirmMode = ws.confirm_mode ?? 'admin_only';
+
     for (const task of tasks) {
         // «я» → имя отправителя
         const assigneeRaw = (task.assignee || '').trim();
         if (/^я(\s|$)/i.test(assigneeRaw) && ctx.from) {
             task.assignee = resolveSelfAssignee(ctx.from);
+        }
+
+        // Автономный режим: создаём задачу сразу, без карточки-подтверждения.
+        if (confirmMode === 'auto') {
+            await autoCreateTask(ctx, task, ws.tenant_id, chatId, targetChatId);
+            continue;
         }
 
         const taskId = crypto.randomBytes(8).toString('hex');
@@ -625,6 +644,67 @@ async function processTaskAndConfirm(ctx: Context, text: string, force = false, 
     }
 
     cleanUpCache();
+}
+
+// autoCreateTask — автономный режим (confirm_mode='auto'): создаёт задачу в
+// YouGile напрямую, без карточки-подтверждения, и постит краткое уведомление.
+// Дубли в этом режиме некому подтверждать вручную, поэтому при срабатывании
+// дедупа задачу тихо пропускаем — это удерживает «минимум ложных» карточек.
+async function autoCreateTask(
+    ctx: Context,
+    task: ParsedTask,
+    tenantId: string,
+    originChatId: number,
+    targetChatId: number | string,
+): Promise<void> {
+    // @username → имя из YouGile, если привязан через /bind.
+    let assignee = (task.assignee || '').trim();
+    if (assignee.startsWith('@')) {
+        const mapped = userMapping[assignee.toLowerCase()];
+        if (mapped) assignee = mapped;
+    }
+    const title = task.title || 'Новая задача из Telegram';
+    const description = task.description || '';
+    const deadline = task.deadline || '';
+
+    let result;
+    try {
+        result = await sendTaskToOvraBackend(tenantId, title, assignee, description, deadline, false);
+    } catch (e) {
+        console.error('[auto] create task error:', e);
+        return;
+    }
+
+    // Найдены похожие задачи — в авто-режиме пропускаем, чтобы не задвоить.
+    if (result.isDuplicate) {
+        console.log(`[auto] skipped duplicate: "${title}"`);
+        return;
+    }
+
+    // Запоминаем для исходного чата — AI не создаст её повторно (< 10 мин).
+    lastConfirmedTask.set(originChatId, { title, ts: Date.now() });
+
+    const backendId: string | undefined = (result as any).id;
+    const text =
+        `✅ *Задача создана автоматически*\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `📌 *${title}*` +
+        (assignee ? `\n👤 ${assignee}` : '') +
+        (deadline ? `\n⏰ ${deadline}` : '');
+
+    try {
+        const sent = await ctx.telegram.sendMessage(targetChatId, text, {
+            parse_mode: 'Markdown',
+            ...(backendId
+                ? Markup.inlineKeyboard([Markup.button.callback('🗑️', `del_task_${backendId}`)])
+                : {}),
+        });
+        if (backendId && typeof sent === 'object' && sent && 'message_id' in sent) {
+            taskIdByMessage.set(sent.message_id, backendId);
+        }
+    } catch (e) {
+        console.error('[auto] send notice error:', e);
+    }
 }
 
 // performColumnMove — проверяет права и двигает карточку в РЕАЛЬНУЮ колонку
@@ -989,7 +1069,16 @@ bot.on('voice', async (ctx) => {
         // Иначе: сначала пробуем как перемещение существующей задачи
         // («лендинг готов»), и только потом — как новую задачу.
         if (await tryHandleTaskMove(ctx, text)) return;
-        await processTaskAndConfirm(ctx, text);
+        // Голосовое отправлено осознанно — если задачу не распознали, не молчим.
+        await processTaskAndConfirm(ctx, text, false, [], async () => {
+            await ctx.reply(
+                '🤔 Не разобрал задачу в голосовом.\nСкажи чётче: *что* сделать, *кто* и *к какому сроку*.',
+                {
+                    parse_mode: 'Markdown',
+                    reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true },
+                },
+            );
+        });
     } catch (e) {
         console.error('[voice] handler error:', e);
     }
@@ -1575,7 +1664,26 @@ bot.command('confirm', async (ctx) => {
     return ctx.reply('Используй эту команду в группе: /confirm group или /confirm pm');
 });
 
-// Настройка режима подтверждения задач: только админы или все участники.
+// Настройка режима подтверждения задач: только админы / все участники / авто.
+// 'auto' — автономный режим: задачи создаются сразу, без карточки-подтверждения.
+type ConfirmMode = 'admin_only' | 'everyone' | 'auto';
+
+function confirmModeLabel(mode: string): string {
+    if (mode === 'everyone') return '👥 Все участники';
+    if (mode === 'auto') return '⚡ Авто (без подтверждения)';
+    return '🔒 Только администраторы';
+}
+
+// Клавиатура выбора режима. Текущий помечен галочкой; кнопки в столбик — длинные подписи.
+function confirmModeKeyboard(current: string) {
+    const mark = (m: ConfirmMode, label: string) => (current === m ? `✅ ${label}` : label);
+    return Markup.inlineKeyboard([
+        [Markup.button.callback(mark('admin_only', '🔒 Только администраторы'), 'cm_admin_only')],
+        [Markup.button.callback(mark('everyone', '👥 Все участники'), 'cm_everyone')],
+        [Markup.button.callback(mark('auto', '⚡ Авто (без подтверждения)'), 'cm_auto')],
+    ]);
+}
+
 bot.command('confirm_mode', async (ctx) => {
     if (ctx.chat.type === 'private') {
         return ctx.reply('Эта команда работает только в группе.');
@@ -1589,68 +1697,34 @@ bot.command('confirm_mode', async (ctx) => {
     }
 
     const current = ws.confirm_mode ?? 'admin_only';
-    const label = current === 'everyone' ? '👥 Все участники' : '🔒 Только администраторы';
     await ctx.reply(
-        `⚙️ *Режим подтверждения задач*\n\nСейчас: *${label}*\n\nКто может подтверждать и отклонять задачи?`,
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                Markup.button.callback(
-                    current === 'admin_only' ? '✅ Только администраторы' : 'Только администраторы',
-                    'cm_admin_only'
-                ),
-                Markup.button.callback(
-                    current === 'everyone' ? '✅ Все участники' : 'Все участники',
-                    'cm_everyone'
-                ),
-            ]),
-        }
+        `⚙️ *Режим создания задач*\n\nСейчас: *${confirmModeLabel(current)}*\n\n` +
+        `🔒 / 👥 — задача приходит карточкой на подтверждение.\n` +
+        `⚡ *Авто* — задача создаётся сразу, без подтверждения.`,
+        { parse_mode: 'Markdown', ...confirmModeKeyboard(current) }
     );
 });
 
-bot.action('cm_admin_only', async (ctx) => {
+// applyConfirmMode — общий обработчик трёх кнопок выбора режима.
+async function applyConfirmMode(ctx: Context, mode: ConfirmMode, toast: string): Promise<void> {
     const chatId = ctx.chat?.id;
-    if (!chatId) return ctx.answerCbQuery();
+    if (!chatId) { await ctx.answerCbQuery().catch(() => {}); return; }
     const ws = await resolveTenant(chatId).catch(() => null);
-    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
+    if (!ws) { await ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true }).catch(() => {}); return; }
     const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
-    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
+    if (!isAdmin) { await ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true }).catch(() => {}); return; }
 
-    await setConfirmMode(ws.tenant_id, 'admin_only');
+    await setConfirmMode(ws.tenant_id, mode);
     await ctx.editMessageText(
-        '⚙️ *Режим подтверждения задач*\n\nСейчас: *🔒 Только администраторы*',
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                Markup.button.callback('✅ Только администраторы', 'cm_admin_only'),
-                Markup.button.callback('Все участники', 'cm_everyone'),
-            ]),
-        }
-    );
-    await ctx.answerCbQuery('Режим обновлён: только администраторы.');
-});
+        `⚙️ *Режим создания задач*\n\nСейчас: *${confirmModeLabel(mode)}*`,
+        { parse_mode: 'Markdown', ...confirmModeKeyboard(mode) }
+    ).catch(() => {});
+    await ctx.answerCbQuery(toast).catch(() => {});
+}
 
-bot.action('cm_everyone', async (ctx) => {
-    const chatId = ctx.chat?.id;
-    if (!chatId) return ctx.answerCbQuery();
-    const ws = await resolveTenant(chatId).catch(() => null);
-    if (!ws) return ctx.answerCbQuery('Воркспейс не найден.', { show_alert: true });
-    const isAdmin = await canManageSettings(chatId, ctx.from!.id, ws.tenant_id);
-    if (!isAdmin) return ctx.answerCbQuery('Только администратор может менять настройки.', { show_alert: true });
-
-    await setConfirmMode(ws.tenant_id, 'everyone');
-    await ctx.editMessageText(
-        '⚙️ *Режим подтверждения задач*\n\nСейчас: *👥 Все участники*',
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                Markup.button.callback('Только администраторы', 'cm_admin_only'),
-                Markup.button.callback('✅ Все участники', 'cm_everyone'),
-            ]),
-        }
-    );
-    await ctx.answerCbQuery('Режим обновлён: все участники.');
-});
+bot.action('cm_admin_only', (ctx) => applyConfirmMode(ctx, 'admin_only', 'Режим обновлён: только администраторы.'));
+bot.action('cm_everyone',   (ctx) => applyConfirmMode(ctx, 'everyone', 'Режим обновлён: все участники.'));
+bot.action('cm_auto',       (ctx) => applyConfirmMode(ctx, 'auto', 'Режим обновлён: автономный.'));
 
 async function sendHelp(ctx: Context) {
     const miniAppLine = MINI_APP_URL
@@ -1677,7 +1751,7 @@ async function sendHelp(ctx: Context) {
         `/trash — корзина (24 ч до удаления)\n` +
         `/setup — подключить или переподключить YouGile\n` +
         `/confirm group|pm — куда приходят подтверждения\n` +
-        `/confirm\\_mode — кто может подтверждать задачи\n` +
+        `/confirm\\_mode — подтверждение задач или ⚡ авто-режим\n` +
         `/calendar — Google / Яндекс Календарь\n` +
         `/bind Имя — привязать @ к аккаунту YouGile\n\n` +
         `*Команды в личке:*\n` +
@@ -2090,8 +2164,14 @@ async function sendBoard(ctx: Context) {
 
     const loading = await ctx.reply('⏳ Загружаю доску…');
     try {
-        const tasks = await listTasks(ws.tenant_id);
+        // Колонки тянем параллельно — из них берём реальные цвета YouGile для эмодзи.
+        // Если не удалось — статусы откатятся на канонические эмодзи (см. statusEmojiByColor).
+        const [tasks, columns] = await Promise.all([
+            listTasks(ws.tenant_id),
+            listBoardColumns(ws.tenant_id).catch(() => [] as BoardColumn[]),
+        ]);
         const approved = tasks.filter(t => t.approval_status === 'approved');
+        const colors = statusColorMap(columns);
 
         type TaskArr = typeof approved;
         const groups: Record<string, TaskArr> = {
@@ -2102,18 +2182,18 @@ async function sendBoard(ctx: Context) {
             if (bucket) bucket.push(t);
         }
 
-        const labels: Record<string, string> = {
-            todo: '🔵 В очереди',
-            in_progress: '🟡 В работе',
-            review: '🟣 На ревью',
-            done: '✅ Готово',
+        const labelText: Record<string, string> = {
+            todo: 'В очереди',
+            in_progress: 'В работе',
+            review: 'На ревью',
+            done: 'Готово',
         };
 
         const lines = ['📋 *Доска задач*', '━━━━━━━━━━━━━━━━━━'];
         let total = 0;
         for (const status of ['todo', 'in_progress', 'review', 'done'] as const) {
             const items: TaskArr = groups[status] ?? [];
-            lines.push(`\n${labels[status]} *(${items.length})*`);
+            lines.push(`\n${statusEmojiByColor(status, colors)} *${labelText[status]}* *(${items.length})*`);
             for (const t of items) {
                 const dl = t.deadline
                     ? ` · ${new Date(t.deadline) < new Date() ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU')}`
@@ -2136,10 +2216,15 @@ async function sendBoard(ctx: Context) {
 bot.command('board', sendBoard);
 
 // Форматирует данные дайджеста в текст (Markdown). Возвращает null, если задач нет.
-function formatDigest(data: DigestData): string | null {
+async function formatDigest(data: DigestData): Promise<string | null> {
     const total = data.assignees.reduce((s, a) => s + a.tasks.length, 0)
         + (data.unassigned?.length ?? 0);
     if (total === 0) return null;
+
+    // Реальные цвета колонок YouGile для эмодзи статуса; при ошибке — канонические.
+    const colors = statusColorMap(
+        await listBoardColumns(data.tenant_id).catch(() => [] as BoardColumn[])
+    );
 
     const lines: string[] = [`📋 *Дайджест задач*\n━━━━━━━━━━━━━━━━━━`];
 
@@ -2153,7 +2238,7 @@ function formatDigest(data: DigestData): string | null {
             const dl = t.deadline
                 ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU', { timeZone: tz })}`
                 : '';
-            lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+            lines.push(`  ${statusEmojiByColor(t.status, colors)} ${t.title}${dl}`);
         }
     }
 
@@ -2163,7 +2248,7 @@ function formatDigest(data: DigestData): string | null {
             const dl = t.deadline
                 ? ` · ${t.overdue ? '🔴' : '📅'} ${new Date(t.deadline).toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' })}`
                 : '';
-            lines.push(`  ${statusEmoji(t.status)} ${t.title}${dl}`);
+            lines.push(`  ${statusEmojiByColor(t.status, colors)} ${t.title}${dl}`);
         }
     }
 
@@ -2227,7 +2312,7 @@ export async function handleDigestDue(payload: { chat_id: string; tenant_id: str
     if (!chatId) throw new Error(`invalid chat_id: ${payload.chat_id}`);
 
     const data = await getDigest(payload.tenant_id);
-    const text = formatDigest(data);
+    const text = await formatDigest(data);
     if (!text) return; // нет открытых задач — не спамим пустым дайджестом
 
     await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown' });
@@ -2245,7 +2330,7 @@ async function sendDigest(ctx: Context) {
 
     try {
         const data = await getDigest(ws.tenant_id);
-        const text = formatDigest(data);
+        const text = await formatDigest(data);
 
         await ctx.telegram.editMessageText(ctx.chat!.id, loading.message_id, undefined,
             text ?? '✅ Открытых задач нет — всё чисто!', { parse_mode: 'Markdown' });
@@ -2576,6 +2661,22 @@ const YOUGILE_COLOR_EMOJI: Record<number, string> = {
 
 function colorEmoji(color: number): string {
     return YOUGILE_COLOR_EMOJI[color] ?? '';
+}
+
+// statusColorMap строит «канонический статус → индекс цвета YouGile» по колонкам
+// доски: берём цвет первой колонки, замапленной на каждый статус. Нужна для /board
+// и /digest, чтобы эмодзи статуса отражал реальный цвет колонки YouGile.
+function statusColorMap(cols: BoardColumn[]): Record<string, number> {
+    const m: Record<string, number> = {};
+    for (const c of cols) {
+        if (c.status && !(c.status in m)) m[c.status] = c.color;
+    }
+    return m;
+}
+
+// Эмодзи статуса по реальному цвету колонки YouGile; откат на канонический statusEmoji.
+function statusEmojiByColor(status: string, colors: Record<string, number>): string {
+    return colorEmoji(colors[status] ?? 0) || statusEmoji(status);
 }
 
 // Человекочитаемое русское название статуса.

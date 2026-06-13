@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ovra — AI PM-бот для команды</title>
+<style>
+  :root {
+    --brand: #3450CD;
+    --brand-light: #5B78E8;
+    --brand-glow: rgba(52, 80, 205, 0.25);
+    --bg: #0B0D1A;
+    --surface: rgba(255,255,255,0.05);
+    --surface-border: rgba(255,255,255,0.1);
+    --text: #E8EAFF;
+    --text-dim: rgba(232,234,255,0.55);
+    --green: #22C55E;
+    --amber: #F59E0B;
+    --red: #EF4444;
+    --radius: 16px;
+    --radius-sm: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* Aurora background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 20% 10%, rgba(52,80,205,0.18) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 80% 80%, rgba(91,120,232,0.12) 0%, transparent 60%),
+      radial-gradient(ellipse 40% 60% at 60% 30%, rgba(52,80,205,0.08) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Hero */
+  .hero {
+    text-align: center;
+    margin-bottom: 64px;
+  }
+
+  .badge {
+    display: inline-block;
+    background: var(--brand-glow);
+    border: 1px solid rgba(52,80,205,0.4);
+    color: var(--brand-light);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 6px 16px;
+    border-radius: 100px;
+    margin-bottom: 24px;
+    backdrop-filter: blur(8px);
+  }
+
+  .hero h1 {
+    font-size: clamp(48px, 8vw, 80px);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    background: linear-gradient(135deg, #fff 30%, var(--brand-light) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 20px;
+  }
+
+  .hero .tagline {
+    font-size: 20px;
+    color: var(--text-dim);
+    max-width: 640px;
+    margin: 0 auto 40px;
+  }
+
+  /* Problem card */
+  .problem-card {
+    background: linear-gradient(135deg, rgba(52,80,205,0.15), rgba(52,80,205,0.05));
+    border: 1px solid rgba(52,80,205,0.3);
+    border-radius: var(--radius);
+    padding: 32px;
+    margin-bottom: 64px;
+    backdrop-filter: blur(16px);
+    text-align: center;
+  }
+
+  .problem-card p {
+    font-size: 18px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .problem-card .highlight {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  /* Flow */
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    margin-bottom: 64px;
+    row-gap: 8px;
+  }
+
+  .flow-step {
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-sm);
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    backdrop-filter: blur(8px);
+    white-space: nowrap;
+  }
+
+  .flow-arrow {
+    color: var(--brand-light);
+    font-size: 18px;
+    padding: 0 8px;
+    opacity: 0.7;
+  }
+
+  /* Section */
+  .section {
+    margin-bottom: 48px;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .section-icon {
+    font-size: 22px;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--brand-glow);
+    border: 1px solid rgba(52,80,205,0.35);
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+
+  .section-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .section-subtitle {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  /* Feature grid */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+
+  .feature-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    backdrop-filter: blur(8px);
+    transition: border-color 0.2s;
+  }
+
+  .feature-item:hover {
+    border-color: rgba(52,80,205,0.4);
+  }
+
+  .feature-status {
+    font-size: 16px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .feature-text {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.4;
+  }
+
+  /* Highlight section (голосовые) */
+  .voice-highlight {
+    background: linear-gradient(135deg, rgba(52,80,205,0.2), rgba(91,120,232,0.1));
+    border: 1px solid rgba(91,120,232,0.4);
+    border-radius: var(--radius);
+    padding: 32px;
+    margin-bottom: 48px;
+    backdrop-filter: blur(16px);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .voice-highlight::before {
+    content: '🎙️';
+    position: absolute;
+    right: 24px;
+    top: 20px;
+    font-size: 64px;
+    opacity: 0.15;
+  }
+
+  .voice-highlight h2 {
+    font-size: 26px;
+    font-weight: 800;
+    margin-bottom: 12px;
+    background: linear-gradient(135deg, #fff, var(--brand-light));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .voice-highlight p {
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    font-size: 15px;
+  }
+
+  .voice-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .voice-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 15px;
+  }
+
+  .voice-step-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--brand);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* Bonus table */
+  .bonus-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+
+  .bonus-item {
+    display: flex;
+    gap: 14px;
+    background: linear-gradient(135deg, rgba(52,80,205,0.1), rgba(52,80,205,0.03));
+    border: 1px solid rgba(52,80,205,0.25);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    backdrop-filter: blur(8px);
+    transition: border-color 0.2s;
+  }
+
+  .bonus-item:hover {
+    border-color: rgba(52,80,205,0.5);
+  }
+
+  .bonus-icon {
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+
+  .bonus-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .bonus-desc {
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+
+  /* Tech stack */
+  .tech-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
+  }
+
+  .tech-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    font-size: 13px;
+  }
+
+  .tech-label {
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  .tech-value {
+    color: var(--brand-light);
+    font-weight: 600;
+    text-align: right;
+    max-width: 55%;
+  }
+
+  /* Demo scenario */
+  .demo-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+  }
+
+  .demo-steps::before {
+    content: '';
+    position: absolute;
+    left: 19px;
+    top: 24px;
+    bottom: 24px;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--brand), rgba(52,80,205,0.1));
+  }
+
+  .demo-step {
+    display: flex;
+    gap: 20px;
+    padding: 16px 0;
+    position: relative;
+  }
+
+  .demo-step-dot {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--brand);
+    border: 3px solid var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .demo-step-content {
+    padding-top: 8px;
+  }
+
+  .demo-step-title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+
+  .demo-step-desc {
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+
+  /* Roadmap pills */
+  .roadmap-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .roadmap-pill {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.25);
+    color: rgba(239,68,68,0.8);
+    padding: 6px 14px;
+    border-radius: 100px;
+    font-size: 13px;
+  }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    margin-top: 80px;
+    padding-top: 32px;
+    border-top: 1px solid var(--surface-border);
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  .footer strong {
+    color: var(--brand-light);
+  }
+
+  /* Divider */
+  .divider {
+    height: 1px;
+    background: var(--surface-border);
+    margin: 48px 0;
+  }
+
+  /* Quote */
+  blockquote {
+    border-left: 3px solid var(--brand);
+    padding-left: 20px;
+    margin: 24px 0;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="badge">Хакатон 2026 · Трек «Профи»</div>
+    <h1>Ovra</h1>
+    <p class="tagline">
+      AI PM-бот, который слушает ваши чаты и встречи, создаёт задачи на YouGile
+      и следит за их выполнением — без ручного ввода.
+    </p>
+  </div>
+
+  <!-- Problem -->
+  <div class="problem-card">
+    <p>Команды тратят часы на перекладывание договорённостей из чата в таск-трекер вручную.</p>
+    <p>Итоги встреч теряются. Дедлайны забываются. PM превращается в секретаря.</p>
+    <br>
+    <span class="highlight">Ovra это автоматизирует.</span>
+  </div>
+
+  <!-- Flow -->
+  <div class="flow">
+    <div class="flow-step">Сообщение / голос / встреча</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">AI извлекает задачу</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">Подтверждение ✅</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">YouGile</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">Напоминание + Дайджест</div>
+  </div>
+
+  <!-- Voice highlight -->
+  <div class="voice-highlight">
+    <h2>🎙️ Полностью голосовое управление</h2>
+    <p>Единственный бот, где задачами можно управлять без единого напечатанного символа.</p>
+    <div class="voice-steps">
+      <div class="voice-step">
+        <div class="voice-step-num">1</div>
+        <span>Надиктовал в чат → задача создана в YouGile</span>
+      </div>
+      <div class="voice-step">
+        <div class="voice-step-num">2</div>
+        <span>Ответил голосовым на карточку → поля задачи обновились</span>
+      </div>
+      <div class="voice-step">
+        <div class="voice-step-num">3</div>
+        <span>Сказал «готово» в ответ на карточку → задача переехала в Done</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section: Bot -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🤖</div>
+      <div>
+        <div class="section-title">Бот в Telegram</div>
+        <div class="section-subtitle">18 команд, полноценная работа в группах и личке</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Работа в групповом чате и в личке</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Онбординг: подключение YouGile по API-ключу или логин/пароль</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">CLI ygsetup: разворачивает демо-окружение в YouGile за одну команду</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Маппинг Telegram @username → YouGile-сотрудник (/bind)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Multi-tenant: несколько команд на одном боте</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Настройка часового пояса команды (/timezone)</span></div>
+    </div>
+  </div>
+
+  <!-- Section: AI extraction -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🧠</div>
+      <div>
+        <div class="section-title">Извлечение задач из переписки</div>
+        <div class="section-subtitle">OpenRouter · Mistral-7B-Instruct · контекст 10 сообщений</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">AI-парсинг каждого сообщения: задача + дедлайн + исполнитель</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Контекст последних 10 сообщений чата для точности</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Дедупликация — повторные задачи не создаются (окно 10 мин)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Approval workflow: ✅ / ✏️ / ❌ — человек контролирует</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Реакции-триггеры ✍️ 🔥 → мгновенная задача из сообщения</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Heuristic-режим для простых случаев — экономия токенов</span></div>
+    </div>
+  </div>
+
+  <!-- Section: Voice -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🎙️</div>
+      <div>
+        <div class="section-title">Голосовые сообщения в чате</div>
+        <div class="section-subtitle">Yandex SpeechKit REST · OGG/Opus · до 30 сек</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Голосовое в чате → транскрипция → задача на доске</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Голосовой ответ на карточку → редактирование полей задачи</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Голосовой ответ → AI определяет целевую колонку → перемещение</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Весь цикл задач управляется без набора текста</span></div>
+    </div>
+  </div>
+
+  <!-- Section: YouGile -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">📋</div>
+      <div>
+        <div class="section-title">Интеграция с YouGile</div>
+        <div class="section-subtitle">YouGile REST API v2 · полный жизненный цикл задач</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Создание задач: название, колонка, исполнитель, дедлайн</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Перемещение по колонкам (AI маппит произвольное → реальная колонка)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Закрытие, удаление, редактирование полей</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Автосинхронизация YouGile → Postgres (вручную двинули — бот знает)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Поддержка произвольных колонок, не только todo/done</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">/board — просмотр канбана в Telegram, /trash — корзина 24ч</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Шифрование токенов AES-256-GCM</span></div>
+    </div>
+  </div>
+
+  <!-- Section: Meetings -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">📹</div>
+      <div>
+        <div class="section-title">Встречи (Яндекс.Телемост)</div>
+        <div class="section-subtitle">Playwright · SpeechKit gRPC v3 · per-speaker транскрипция</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Бот видит ссылку Telemost в чате → планирует подключение</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Google Calendar + Yandex Calendar: автодетекция встреч</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Заходит в Telemost через Playwright + headless Chromium</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Транскрипция с разметкой по спикерам — видно кто что сказал</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Map-reduce для длинных встреч (работает с 2-часовыми записями)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Саммари: заголовок + содержание + actionable задачи</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Задачи по итогам → approval-карточки → YouGile</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Бот сам уходит после окончания встречи</span></div>
+    </div>
+  </div>
+
+  <!-- Section: Reminders -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🔔</div>
+      <div>
+        <div class="section-title">Напоминания и дайджест</div>
+        <div class="section-subtitle">Timezone-aware · дедупликация · без спама</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Напоминание в личку за 24ч до дедлайна</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Уведомление о просрочке и изменении статуса</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Один раз на задачу — не спам</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Вечерний дайджест: задачи по исполнителям, раз в сутки</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Настраиваемое время дайджеста (/digest_time HH:MM)</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Timezone-aware для каждого участника команды</span></div>
+    </div>
+  </div>
+
+  <!-- Section: Mini App -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">📱</div>
+      <div>
+        <div class="section-title">Telegram Mini App</div>
+        <div class="section-subtitle">React + Vite + TypeScript · HMAC-SHA256 auth</div>
+      </div>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Веб-интерфейс прямо в Telegram — без отдельного приложения</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Безопасность: HMAC-SHA256 верификация initData</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Настройка YouGile: подключение, выбор проекта/доски</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Управление пользователями: роли admin / moderator / member</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Маппинг Telegram → YouGile через интерфейс</span></div>
+      <div class="feature-item"><span class="feature-status">✅</span><span class="feature-text">Редактирование задач: поля, статус, исполнитель, дедлайн</span></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Bonus -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🚀</div>
+      <div>
+        <div class="section-title">Перевыполнение — бонусный функционал</div>
+        <div class="section-subtitle">Сверх обязательного MVP</div>
+      </div>
+    </div>
+    <div class="bonus-grid">
+      <div class="bonus-item">
+        <div class="bonus-icon">🎙️</div>
+        <div>
+          <div class="bonus-title">Полностью голосовое управление</div>
+          <div class="bonus-desc">Создание + редактирование + перемещение без набора текста</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">🔄</div>
+        <div>
+          <div class="bonus-title">Автосинхронизация YouGile → БД</div>
+          <div class="bonus-desc">Задачу двинули вручную в YouGile — бот всё равно знает актуальный статус</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">👤</div>
+        <div>
+          <div class="bonus-title">Per-speaker транскрипция</div>
+          <div class="bonus-desc">Видно кто что сказал — точнее извлечение «Петя возьмёт лендинг»</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">📅</div>
+        <div>
+          <div class="bonus-title">Google + Yandex Calendar</div>
+          <div class="bonus-desc">Работает с обоими — обнаруживает встречи автоматически</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">📊</div>
+        <div>
+          <div class="bonus-title">GET /metrics</div>
+          <div class="bonus-desc">JSON-счётчик встреч и задач — быстрая проверка здоровья системы</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">🔐</div>
+        <div>
+          <div class="bonus-title">AES-256-GCM шифрование</div>
+          <div class="bonus-desc">Production-level безопасность хранения API-токенов</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">📱</div>
+        <div>
+          <div class="bonus-title">Telegram Mini App</div>
+          <div class="bonus-desc">Полноценный веб-интерфейс прямо в Telegram</div>
+        </div>
+      </div>
+      <div class="bonus-item">
+        <div class="bonus-icon">🏗️</div>
+        <div>
+          <div class="bonus-title">CLI ygsetup</div>
+          <div class="bonus-desc">Разворачивает демо-окружение в YouGile за одну команду</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Demo -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🎬</div>
+      <div>
+        <div class="section-title">Demo-сценарий (end-to-end)</div>
+        <div class="section-subtitle">Полный цикл от сообщения до вечернего дайджеста</div>
+      </div>
+    </div>
+    <div class="demo-steps">
+      <div class="demo-step">
+        <div class="demo-step-dot">💬</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Сообщение или голосовой в чат</div>
+          <div class="demo-step-desc">«Антон, сделай лендинг к пятнице» — AI извлекает задачу, дедлайн, исполнителя</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">✅</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Approval-карточка</div>
+          <div class="demo-step-desc">Бот присылает карточку с кнопками ✅/✏️/❌ — одно нажатие для подтверждения</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">📋</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Задача в YouGile</div>
+          <div class="demo-step-desc">Нужная колонка, исполнитель Антон, дедлайн пятница — всё через API без ручного ввода</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">🔔</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Напоминание Антону</div>
+          <div class="demo-step-desc">В личку за 24ч до дедлайна — один раз, не спам</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">🎙️</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Голосовой ответ «готово»</div>
+          <div class="demo-step-desc">Антон отвечает голосовым на карточку → задача переезжает в Done</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">🌙</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Вечерний дайджест</div>
+          <div class="demo-step-desc">Лендинг ✅, список оставшихся задач — каждому в нужном часовом поясе</div>
+        </div>
+      </div>
+      <div class="demo-step">
+        <div class="demo-step-dot">📹</div>
+        <div class="demo-step-content">
+          <div class="demo-step-title">Встреча в Telemost</div>
+          <div class="demo-step-desc">Бот заходит сам → транскрибирует → саммари + новые задачи → YouGile</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Tech stack -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🛠️</div>
+      <div>
+        <div class="section-title">Технологический стек</div>
+      </div>
+    </div>
+    <div class="tech-grid">
+      <div class="tech-item"><span class="tech-label">Бот</span><span class="tech-value">Node.js + TypeScript</span></div>
+      <div class="tech-item"><span class="tech-label">Бэкенд</span><span class="tech-value">Go + PostgreSQL</span></div>
+      <div class="tech-item"><span class="tech-label">AI / LLM</span><span class="tech-value">OpenRouter · Mistral-7B</span></div>
+      <div class="tech-item"><span class="tech-label">STT (чат)</span><span class="tech-value">SpeechKit REST v1</span></div>
+      <div class="tech-item"><span class="tech-label">STT (встречи)</span><span class="tech-value">SpeechKit gRPC v3</span></div>
+      <div class="tech-item"><span class="tech-label">Встречи</span><span class="tech-value">Playwright + Chromium</span></div>
+      <div class="tech-item"><span class="tech-label">Kanban</span><span class="tech-value">YouGile API v2</span></div>
+      <div class="tech-item"><span class="tech-label">Календарь</span><span class="tech-value">Google + Yandex CalDAV</span></div>
+      <div class="tech-item"><span class="tech-label">Mini App</span><span class="tech-value">React + Vite + TS</span></div>
+      <div class="tech-item"><span class="tech-label">Инфра</span><span class="tech-value">Docker Compose</span></div>
+      <div class="tech-item"><span class="tech-label">Безопасность</span><span class="tech-value">AES-256-GCM · HMAC</span></div>
+      <div class="tech-item"><span class="tech-label">Мониторинг</span><span class="tech-value">JSON /metrics</span></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Roadmap (honest) -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-icon">🗺️</div>
+      <div>
+        <div class="section-title">Честный roadmap</div>
+        <div class="section-subtitle">Что не реализовано — планируем после хакатона</div>
+      </div>
+    </div>
+    <div class="roadmap-pills">
+      <span class="roadmap-pill">Геймификация (баллы, значки)</span>
+      <span class="roadmap-pill">Рекомендации по обучению</span>
+      <span class="roadmap-pill">База знаний команды</span>
+      <span class="roadmap-pill">Аналитический дашборд</span>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <strong>Ovra</strong> — потому что задачи не должны теряться в чате.
+  </div>
+
+</div>
+</body>
+</html>

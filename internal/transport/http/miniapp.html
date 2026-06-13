@@ -570,6 +570,30 @@
         </div>
         <div id="taskDetectionBadge" style="display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:10px;background:var(--bg);font-size:13px;"></div>
       </div>
+      <!-- Task confirmation mode (admin only): two orthogonal toggles -->
+      <div id="dashConfirmRow" class="info-row hidden" style="flex-direction:column;align-items:stretch;gap:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-size:14px;font-weight:600;color:var(--text);">Автосоздание задач</div>
+            <div style="font-size:12px;color:var(--hint);margin-top:2px;">Без карточки-подтверждения</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="autoCreateToggle" onchange="onConfirmModeChange()">
+            <span class="track"></span>
+          </label>
+        </div>
+        <div id="approveWhoRow" style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-size:14px;font-weight:600;color:var(--text);">Подтверждать могут все</div>
+            <div style="font-size:12px;color:var(--hint);margin-top:2px;">Иначе — только администраторы</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="approveEveryoneToggle" onchange="onConfirmModeChange()">
+            <span class="track"></span>
+          </label>
+        </div>
+        <div id="confirmModeBadge" style="display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:10px;background:var(--bg);font-size:13px;"></div>
+      </div>
       <!-- Digest toggle (admin only) -->
       <div id="dashDigestRow" class="info-row hidden">
         <span class="info-label">Дайджест задач</span>
@@ -1104,6 +1128,7 @@ async function loadDashboard() {
   if (isAdmin) {
     show('dashProjectRow');
     show('dashTaskDetectionRow');
+    show('dashConfirmRow');
     show('dashDigestRow');
     show('dashAdminActions');
     show('dashRolesSection');
@@ -1132,6 +1157,9 @@ async function loadDashboard() {
       const isAi = (state.task_detection ?? 'heuristic') === 'ai';
       el('taskDetectionToggle').checked = isAi;
       renderTaskDetectionBadge(isAi);
+
+      // Task confirmation mode — read from the workspace DTO (state.workspace.*).
+      initConfirmModeUI(workspace.confirm_mode || 'everyone');
     }
 
     // Digest settings (admin)
@@ -1280,6 +1308,59 @@ async function onTaskDetectionToggle() {
       body: JSON.stringify({ mode }),
     });
   } catch (e) { tg.showAlert('Не удалось сохранить настройки детекции'); }
+}
+
+// ── Confirm mode ──────────────────────────────────────────────────────────────
+// Two orthogonal toggles map onto the single confirm_mode field:
+//   autoCreate ON              → 'auto'      (создаётся сразу, без карточки)
+//   autoCreate OFF + всеON      → 'everyone'  (подтверждают все)
+//   autoCreate OFF + всеOFF     → 'admin_only'(подтверждают админы)
+// «Кто подтверждает» неактуально в авто-режиме — там строка гасится.
+function initConfirmModeUI(cm) {
+  el('autoCreateToggle').checked = (cm === 'auto');
+  el('approveEveryoneToggle').checked = (cm === 'everyone');
+  syncConfirmModeUI();
+}
+
+function syncConfirmModeUI() {
+  const auto = el('autoCreateToggle').checked;
+  const approveEveryone = el('approveEveryoneToggle').checked;
+  const whoRow = el('approveWhoRow');
+  el('approveEveryoneToggle').disabled = auto;
+  whoRow.style.opacity = auto ? '0.4' : '1';
+  whoRow.style.pointerEvents = auto ? 'none' : 'auto';
+  renderConfirmModeBadge(auto, approveEveryone);
+}
+
+function renderConfirmModeBadge(auto, approveEveryone) {
+  const badge = el('confirmModeBadge');
+  if (auto) {
+    badge.style.color = '#3450CD';
+    badge.style.background = 'rgba(52,80,205,.08)';
+    badge.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>' +
+      '<span><b>Авто</b> — задачи создаются сразу, без подтверждения</span>';
+  } else {
+    badge.style.color = 'var(--hint)';
+    badge.style.background = 'var(--bg)';
+    const who = approveEveryone ? 'все участники' : 'только администраторы';
+    badge.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>' +
+      '<span><b>Ручное</b> — подтверждают ' + who + '</span>';
+  }
+}
+
+async function onConfirmModeChange() {
+  syncConfirmModeUI();
+  const auto = el('autoCreateToggle').checked;
+  const approveEveryone = el('approveEveryoneToggle').checked;
+  const mode = auto ? 'auto' : (approveEveryone ? 'everyone' : 'admin_only');
+  try {
+    await fetch(apiBase() + `/v1/workspaces/${tenantId}/confirm-mode`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+  } catch (e) { tg.showAlert('Не удалось сохранить режим подтверждения'); }
 }
 
 async function onDigestToggle() {

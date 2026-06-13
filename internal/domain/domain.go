@@ -54,7 +54,8 @@ type Workspace struct {
 	// Digest settings. DigestTime is "HH:MM" in the workspace timezone.
 	DigestEnabled bool   `yaml:"digest_enabled"`
 	DigestTime    string `yaml:"digest_time"`
-	// ConfirmMode controls who can approve/reject tasks: "admin_only" or "everyone".
+	// ConfirmMode controls task approval: "admin_only" or "everyone" use the
+	// approval-card flow; "auto" creates tasks directly with no confirmation.
 	ConfirmMode string `yaml:"confirm_mode"`
 	// TaskDetection controls how tasks are detected in chat: "ai" (every message)
 	// or "heuristic" (keyword pre-filter before AI).

@@ -100,7 +100,7 @@ export interface WorkspaceInfo {
     board_resolved: boolean;  // сопоставлены ли колонки
     digest_enabled: boolean;
     digest_time: string;      // "HH:MM"
-    confirm_mode: 'admin_only' | 'everyone';
+    confirm_mode: 'admin_only' | 'everyone' | 'auto';
     task_detection: 'ai' | 'heuristic';
     pm_chat_id: string;       // private chat that receives confirmation cards
 }
@@ -323,7 +323,7 @@ export async function setTaskDetection(tenantId: string, mode: 'ai' | 'heuristic
     if (!res.ok) throw new Error(`setTaskDetection HTTP ${res.status}`);
 }
 
-export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'everyone'): Promise<void> {
+export async function setConfirmMode(tenantId: string, mode: 'admin_only' | 'everyone' | 'auto'): Promise<void> {
     const res = await fetch(`${BACKEND_URL}/v1/workspaces/${tenantId}/confirm-mode`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader() },
         body: JSON.stringify({ mode }),
