@@ -26,9 +26,10 @@ type ingestMeetingRequest struct {
 }
 
 type ingestTaskInput struct {
-	Title    string `json:"title"`
-	Assignee string `json:"assignee"`
-	Deadline string `json:"deadline"` // ISO-8601 or empty
+	Title       string `json:"title"`
+	Assignee    string `json:"assignee"`
+	Deadline    string `json:"deadline"`    // ISO-8601 or empty
+	Description string `json:"description"` // per-task context from the LLM, or empty
 }
 
 // meetingDoneNotification is the payload sent to the bot's internal endpoint.
@@ -103,10 +104,16 @@ func (s *Server) handleIngestMeeting(w http.ResponseWriter, r *http.Request) {
 		if t.Title == "" {
 			continue
 		}
+		// Prefer the task's own LLM-written description; fall back to the
+		// whole-meeting summary when the model left it empty.
+		desc := t.Description
+		if desc == "" {
+			desc = req.Summary
+		}
 		in := service.TaskInput{
 			TenantID:    req.TenantID,
 			Title:       t.Title,
-			Description: req.Summary,
+			Description: desc,
 			Assignee:    t.Assignee,
 			Source:      domain.SourceMeeting,
 			Force:       true,

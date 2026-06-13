@@ -189,6 +189,7 @@ interface PendingMeetingTask {
     title: string;
     assignee: string;
     deadline: string;
+    description: string;
     tenantId: string;
     groupChatId: number;
 }
@@ -251,7 +252,7 @@ export interface MeetingDonePayload {
     tenant_id: string;
     title: string;
     summary: string;
-    tasks: Array<{ title: string; assignee: string; deadline: string }>;
+    tasks: Array<{ title: string; assignee: string; deadline: string; description?: string }>;
 }
 
 // Сессии добавления календарного аккаунта (по user id).
@@ -2072,6 +2073,7 @@ export async function handleMeetingDone(payload: MeetingDonePayload): Promise<vo
             title: task.title,
             assignee: task.assignee || '',
             deadline: task.deadline || '',
+            description: task.description || '',
             tenantId: payload.tenant_id,
             groupChatId: chatId,
         });
@@ -2080,6 +2082,7 @@ export async function handleMeetingDone(payload: MeetingDonePayload): Promise<vo
             `🆕 *Задача из созвона*\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `📌 *${task.title}*\n` +
+            (task.description ? `📝 ${task.description}\n` : '') +
             `👤 Исполнитель: ${task.assignee || '—'}\n` +
             `⏳ Дедлайн: ${task.deadline || '—'}\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
@@ -2116,7 +2119,7 @@ bot.action(/^mtask_ok_(.+)$/, async (ctx) => {
         }
 
         const result = await sendTaskToOvraBackend(
-            pending.tenantId, pending.title, assignee, '', pending.deadline, true
+            pending.tenantId, pending.title, assignee, pending.description, pending.deadline, true
         );
 
         pendingMeetingTasks.delete(taskId);
