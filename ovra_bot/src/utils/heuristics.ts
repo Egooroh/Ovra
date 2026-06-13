@@ -108,7 +108,7 @@ const STATUS_PHRASES: Array<{ status: TaskStatus; phrases: string[] }> = [
 const STATUS_STEMS: Array<{ status: TaskStatus; stems: string[] }> = [
     { status: 'review', stems: ['ревью', 'review'] },
     { status: 'done', stems: [
-        'готов', 'сделал', 'сделан', 'выполн', 'доделал', 'доделан',
+        'готов', 'сделал', 'сделан', 'выполнен', 'выполнил', 'выполнено', 'доделал', 'доделан',
         'закончил', 'закончен', 'завершил', 'завершен', 'закрыл', 'закрыт',
         'сдал', 'сдан', 'done', 'finish', 'complete',
     ] },
