@@ -27,6 +27,7 @@ services:
       YOUGILE_API_TOKEN: "${YOUGILE_API_TOKEN:-}"
       APP_SECRET: "${APP_SECRET:-dev-only-change-me}"
       BOT_SECRET: "${BOT_SECRET:-}"
+      WORKER_SECRET: "${WORKER_SECRET:-}"
       # Optional AI column classifier — set OPENROUTER_API_KEY to enable.
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
