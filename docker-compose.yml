@@ -98,6 +98,20 @@ services:
     # Без этого после OOM (Exit 137) контейнер молча оставался лежать.
     restart: unless-stopped
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://app:8080
+    depends_on:
+      - app
+    environment:
+      # Исходящий трафик к Cloudflare edge через корпоративный прокси.
+      HTTPS_PROXY: "http://host.docker.internal:10801"
+      HTTP_PROXY:  "http://host.docker.internal:10801"
+      NO_PROXY: "localhost,127.0.0.1,app"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   bot:
     build: ./ovra_bot
     depends_on:

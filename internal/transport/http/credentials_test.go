@@ -144,6 +144,16 @@ func (f *fakeRepo) ListDueReminders(context.Context, time.Duration) ([]domain.Re
 }
 func (f *fakeRepo) MarkTaskReminded(context.Context, string) error { return nil }
 func (f *fakeRepo) SetConfirmMode(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeRepo) SetTaskDetection(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeRepo) SetWorkspacePmChatId(_ context.Context, _, _ string) error   { return nil }
+func (f *fakeRepo) GetUserByTgID(_ context.Context, _, _ string) (domain.User, error) {
+	return domain.User{}, nil
+}
+func (f *fakeRepo) SetUserRole(_ context.Context, _, _, _ string) error            { return nil }
+func (f *fakeRepo) UpdateUserTimezone(_ context.Context, _, _, _ string) error     { return nil }
+func (f *fakeRepo) UpdateUserTimezoneGlobal(_ context.Context, _, _ string) error  { return nil }
+func (f *fakeRepo) DeletePhantomUser(_ context.Context, _, _ string) error         { return nil }
+func (f *fakeRepo) SetUserYougileBinding(_ context.Context, _, _, _ string) error  { return nil }
 func (f *fakeRepo) SetDigestSettings(_ context.Context, _ string, enabled bool, t string) error {
 	f.digestSettingsSaved.enabled = enabled
 	f.digestSettingsSaved.time = t
