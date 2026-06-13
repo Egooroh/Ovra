@@ -1011,6 +1011,126 @@ func (s *Server) handleMiniAppUpdateDigest(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
+// POST /miniapp/select-project
+// ---------------------------------------------------------------------------
+
+type miniappSelectProjectRequest struct {
+	InitData  string `json:"init_data"`
+	TenantID  string `json:"tenant_id"`
+	ProjectID string `json:"project_id"`
+}
+
+// handleMiniAppSelectProject verifies the caller is the workspace admin, binds the
+// chosen YouGile project, then auto-resolves the board's columns. It is the
+// mini-app's equivalent of POST /v1/.../project + /v1/.../board/resolve, which the
+// browser cannot call directly (those require BOT_SECRET).
+func (s *Server) handleMiniAppSelectProject(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.TelegramBotToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "mini-app: TELEGRAM_BOT_TOKEN not configured")
+		return
+	}
+	if s.cipher == nil || s.yg == nil {
+		writeError(w, http.StatusServiceUnavailable, "board resolution disabled: APP_SECRET not set")
+		return
+	}
+
+	var req miniappSelectProjectRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	if req.InitData == "" || req.TenantID == "" || req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "init_data, tenant_id and project_id are required")
+		return
+	}
+
+	vals, err := parseTelegramInitData(req.InitData, s.cfg.TelegramBotToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid telegram data: "+err.Error())
+		return
+	}
+	caller, err := extractTgUser(vals)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ws, err := s.repo.GetWorkspace(r.Context(), req.TenantID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("get workspace (miniapp select-project)", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	callerTgID := fmt.Sprintf("%d", caller.ID)
+	isAdmin := ws.HostTgID == callerTgID
+	if !isAdmin {
+		if u, err := s.repo.GetUserByTgID(r.Context(), req.TenantID, callerTgID); err == nil && u.Role == domain.RoleAdmin {
+			isAdmin = true
+		}
+	}
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "only the workspace admin can connect the board")
+		return
+	}
+
+	// 1. Bind the chosen project.
+	if err := s.repo.SetWorkspaceProject(r.Context(), req.TenantID, req.ProjectID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		s.log.Error("set project (miniapp)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// 2. Auto-resolve the board's columns (same as /v1/.../board/resolve, empty body).
+	_, enc, err := s.repo.GetYougileTokenEnc(r.Context(), req.TenantID)
+	if err != nil {
+		s.log.Error("get token (miniapp select-project)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if len(enc) == 0 {
+		writeError(w, http.StatusConflict, "workspace is not connected to YouGile")
+		return
+	}
+	token, err := s.cipher.Open(enc)
+	if err != nil {
+		s.log.Error("decrypt token (miniapp select-project)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	result, _, err := s.resolveBoardColumns(r.Context(), req.TenantID, req.ProjectID, token)
+	if err != nil {
+		if errors.Is(err, errNoBoards) {
+			writeError(w, http.StatusNotFound, "no boards in the workspace project")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
+		return
+	}
+	mapping := domain.Columns(result.Mapping)
+	if err := s.repo.SetWorkspaceColumns(r.Context(), req.TenantID, mapping); err != nil {
+		s.log.Error("save resolved columns (miniapp)", "tenant", req.TenantID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "connected",
+		"confident": result.Confident,
+		"complete":  result.Mapping.Complete(),
+		"mapping":   mapping,
+	})
+}
+
+// ---------------------------------------------------------------------------
 // POST /miniapp/set-timezone
 // ---------------------------------------------------------------------------
 

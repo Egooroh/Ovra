@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -72,27 +73,14 @@ func (s *Server) handleResolveBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	boards, err := s.yg.ListBoards(r.Context(), token, ws.YougileProjectID)
+	result, boardID, err := s.resolveBoardColumns(r.Context(), tenant, ws.YougileProjectID, token)
 	if err != nil {
+		if errors.Is(err, errNoBoards) {
+			writeError(w, http.StatusNotFound, "no boards in the workspace project")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
 		return
-	}
-	if len(boards) == 0 {
-		writeError(w, http.StatusNotFound, "no boards in the workspace project")
-		return
-	}
-
-	cols, err := s.yg.ListColumns(r.Context(), token, boards[0].ID)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "yougile: "+err.Error())
-		return
-	}
-
-	// ResolveWithAI uses the dictionary first, then the optional AI classifier
-	// for the long tail, then ordinal. With no classifier it equals Resolve.
-	result, aiErr := columns.ResolveWithAI(r.Context(), cols, s.classifier)
-	if aiErr != nil {
-		s.log.Warn("ai column classifier failed; used dictionary+ordinal", "tenant", tenant, "err", aiErr)
 	}
 	mapping := domain.Columns(result.Mapping)
 	if err := s.repo.SetWorkspaceColumns(r.Context(), tenant, mapping); err != nil {
@@ -106,12 +94,40 @@ func (s *Server) handleResolveBoard(w http.ResponseWriter, r *http.Request) {
 		assignments[i] = columnAssignment{ColumnID: a.ColumnID, Title: a.Title, Status: a.Status, Method: a.Method}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"board_id":    boards[0].ID,
+		"board_id":    boardID,
 		"confident":   result.Confident, // true → mapping is safe to trust without review
 		"complete":    result.Mapping.Complete(),
 		"mapping":     mapping,
 		"assignments": assignments,
 	})
+}
+
+// errNoBoards signals that the workspace's YouGile project has no boards.
+var errNoBoards = errors.New("no boards in the workspace project")
+
+// resolveBoardColumns fetches the first board of the given YouGile project and
+// classifies its columns into Ovra statuses (dictionary → optional AI → ordinal).
+// It does NOT persist anything — the caller stores result.Mapping. The caller
+// supplies an already-decrypted token. Returns errNoBoards when the project has
+// no boards; YouGile transport errors are returned unwrapped (callers map them
+// to 502). Shared by handleResolveBoard (bot, /v1) and the mini-app select-project.
+func (s *Server) resolveBoardColumns(ctx context.Context, tenant, projectID, token string) (columns.Result, string, error) {
+	boards, err := s.yg.ListBoards(ctx, token, projectID)
+	if err != nil {
+		return columns.Result{}, "", err
+	}
+	if len(boards) == 0 {
+		return columns.Result{}, "", errNoBoards
+	}
+	cols, err := s.yg.ListColumns(ctx, token, boards[0].ID)
+	if err != nil {
+		return columns.Result{}, "", err
+	}
+	result, aiErr := columns.ResolveWithAI(ctx, cols, s.classifier)
+	if aiErr != nil {
+		s.log.Warn("ai column classifier failed; used dictionary+ordinal", "tenant", tenant, "err", aiErr)
+	}
+	return result, boards[0].ID, nil
 }
 
 // workspaceToken loads and decrypts the workspace's YouGile token, writing the

@@ -1079,17 +1079,14 @@ async function selectProject(projectId, projectTitle) {
   listEl.innerHTML = '<div class="spinner"></div>';
 
   try {
-    // 1. Привязываем проект
-    const r1 = await fetch(apiBase() + `/v1/workspaces/${tenantId}/project`, {
+    // Привязываем проект и распознаём колонки доски одним запросом.
+    // initData-авторизация: /v1/* недоступны из браузера (требуют BOT_SECRET).
+    const res = await fetch(apiBase() + '/miniapp/select-project', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId }),
+      body: JSON.stringify({ init_data: initData, tenant_id: tenantId, project_id: projectId }),
     });
-    if (!r1.ok) throw new Error('Не удалось привязать проект');
-
-    // 2. Распознаём колонки доски
-    const r2 = await fetch(apiBase() + `/v1/workspaces/${tenantId}/board/resolve`, { method: 'POST' });
-    if (!r2.ok) throw new Error('Не удалось распознать колонки');
+    if (!res.ok) throw new Error('Не удалось подключить доску');
 
     state.workspace.board_resolved = true;
     hide('projectSection');
